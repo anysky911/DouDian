@@ -1,0 +1,7 @@
+{
+  "name": "doudian-tmall-collector",
+  "version": "1.1.0",
+  "private": true,
+  "scripts": { "test": "node --check tmall-new-products.user.js && node --test tmall-new-products.test.cjs" },
+  "devDependencies": { "linkedom": "0.18.12" }
+}
