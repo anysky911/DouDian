@@ -4,18 +4,6 @@
 
 在天猫店铺的“新品”排序列表采集 **店铺名称、商品标题、商品链接**，跨店去重、预览表格，导出 Excel / WPS 可打开的 CSV。
 
-## 安装与使用
-
-1. 浏览器安装并启用 Tampermonkey（篡改猴）。
-2. [安装最新版脚本](https://raw.githubusercontent.com/anysky911/DouDian/main/tmall-new-products.user.js)。若显示源码，复制全部内容到篡改猴“添加新脚本”，保存。
-3. 登录天猫，打开店铺商品列表，手动选择“新品”排序。
-4. 核对面板中的店铺名称，勾选已选择新品，点击“采集当前列表”或“滚动采集”。
-5. 有分页时手动翻页后继续采集；依次打开其他店铺，可累计数据。
-6. 点击“查看表格”检查，再“导出 CSV”。
-
-升级时替换原脚本，不要同时启用两份。保持脚本名称及 namespace 不变可保留原来的篡改猴存储。脚本元数据包含版本和更新地址；自动更新取决于篡改猴的更新设置。
-
-示例店铺：[amencl](https://amencl.tmall.com/) · [xiaozhubite](https://xiaozhubite.tmall.com/) · [mcticco](https://mcticco.tmall.com/)。
 
 ## v1.1.0 适配
 
