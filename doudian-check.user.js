@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         抖店检查V1.2.0
+// @name         抖店检查V1.3.0
 // @namespace    anysky911.doudian.check
-// @version      1.2.0
-// @description  选择商品标题或货号校验模式，逐条搜索 Excel 内容，将结果分别写入标题结果或货号结果列并保存。
+// @version      1.3.0
+// @description  支持商品标题、货号、商品标题+货号三种校验模式，分别搜索并写入标题结果、货号结果列后保存。
 // @homepageURL  https://github.com/anysky911/DouDian
 // @downloadURL  https://raw.githubusercontent.com/anysky911/DouDian/main/doudian-check.user.js
 // @updateURL    https://raw.githubusercontent.com/anysky911/DouDian/main/doudian-check.user.js
@@ -37,7 +37,8 @@ https://github.com/nodeca/pako/blob/main/LICENSE
 
 
 /* 使用：在店铺商品管理（极速版）选好平台、店铺、上架状态等条件，
- * 选择商品标题或货号模式及 .xlsx，设置检测间隔，点击开始。
+ * 选择商品标题、货号或商品标题+货号模式及 .xlsx，设置检测间隔，点击开始。
+ * 组合模式每行先查标题再查货号，已有结果分别跳过，空值不搜索。
  * 商品标题 → 标题结果；货号 → 货号结果。按表头识别列，切换模式保留两列结果。
  * 有商品/无商品仅表示当前筛选条件下的标题搜索结果，不代表跨店同款判定。
  * 文件选择器由浏览器管理，首次请手动进入缓存目录。支持原文件保存及下载副本。
@@ -46,11 +47,16 @@ https://github.com/nodeca/pako/blob/main/LICENSE
  */
 (() => {
   'use strict';
-  const VERSION = '1.2.0', CHANNEL = 'doudian-check-1';
+  const VERSION = '1.3.0', CHANNEL = 'doudian-check-1';
   const MODES = {
     title: { label: '商品标题', resultHeader: '标题结果', searchLabel: '商品名称' },
     sku: { label: '货号', resultHeader: '货号结果', searchLabel: '款式编码' }
   };
+  const RUN_MODES = { ...MODES, both: { label: '商品标题+货号', resultHeader: '标题结果、货号结果' } };
+  function checkModes(mode) {
+    if (!Object.hasOwn(RUN_MODES, mode)) throw new Error('请选择有效的校验模式');
+    return mode === 'both' ? ['title', 'sku'] : [mode];
+  }
   const clean = x => String(x ?? '').trim();
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const visible = e => !!e && e.isConnected && e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
@@ -273,6 +279,11 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       return item[mode] && (!skip || !result || result.startsWith('检测失败'));
     });
   }
+  function planTasks(sheet, mode, skip = true) {
+    const modes = checkModes(mode);
+    const pending = modes.map(m => new Set(tasksFor(sheet, m, skip)));
+    return sheet.items.flatMap(item => modes.flatMap((m, i) => pending[i].has(item) ? [{ item, mode: m }] : []));
+  }
   function patchSheet(sheet) {
     // Patch only result cells in the original XML, leaving all other cells/formatting untouched.
     let source = sheet.source;
@@ -301,7 +312,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     return source;
   }
   // Exposed only for offline tests, never on the web page's global scope.
-  if (typeof module !== 'undefined' && module.exports) { module.exports = { openWorkbook, patchSheet, tasksFor, cellText, columnNo, resultState, checkTitle, setLock }; return; }
+  if (typeof module !== 'undefined' && module.exports) { module.exports = { openWorkbook, patchSheet, tasksFor, planTasks, cellText, columnNo, resultState, checkTitle, setLock }; return; }
 
   const host = document.createElement('div'); host.id = 'dd-check-panel';
   host.style.cssText = 'position:fixed;right:18px;top:110px;z-index:2147483647';
@@ -317,7 +328,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   label{font-size:12px}progress{width:100%;margin:6px 0}#min{border:0;color:white;background:transparent;padding:0 6px}#custom{width:78px}
   </style><section class="box"><header><span>抖店检查V${VERSION}</span><button id="min">收起</button></header><main>
   <p>① 先在页面设置平台、店铺和筛选条件。<br>② 选择校验模式和 Excel。<br>标题查商品名称，货号查款式编码；自动清空另一个搜索框。结果仅表示当前筛选条件下的搜索结果。</p>
-  <div class="row"><label for="mode">校验模式</label><select id="mode"><option value="title">商品标题</option><option value="sku">货号</option></select></div>
+  <div class="row"><label for="mode">校验模式</label><select id="mode"><option value="title">商品标题</option><option value="sku">货号</option><option value="both">商品标题+货号</option></select></div>
   <p id="mapping"></p>
   <div class="row"><button id="pick" class="primary">选择表格</button><button id="fallback">普通选择</button></div>
   <select id="sheet" disabled><option>尚未选择 .xlsx 文件</option></select>
@@ -336,17 +347,18 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   const selected = () => workbook?.sheets[Number(el('sheet').value)];
   const currentMode = () => el('mode').value;
   function modeChanged() {
-    const mode = currentMode(), config = MODES[mode];
+    const mode = currentMode(), modes = checkModes(mode), config = RUN_MODES[mode];
     GM_setValue('checkMode', mode);
-    el('mapping').textContent = `读取“${config.label}” → 搜索“${config.searchLabel}” → 写入“${config.resultHeader}”`;
+    el('mapping').textContent = modes.map(m => { const c = MODES[m]; return `读取“${c.label}” → 搜索“${c.searchLabel}” → 写入“${c.resultHeader}”`; }).join('；每行依次执行：');
     if (workbook) {
-      for (const [i, sheet] of workbook.sheets.entries()) el('sheet').options[i].textContent = `${sheet.name}（${sheet.items.filter(item => item[mode]).length}条${config.label}）`;
+      for (const [i, sheet] of workbook.sheets.entries()) el('sheet').options[i].textContent = `${sheet.name}（${sheet.items.filter(item => modes.some(m => item[m])).length}行）`;
       el('progress').value = 0;
-      status(selected()?.columns[mode] ? `已选择${config.label}校验，结果写入“${config.resultHeader}”。` : `当前工作表缺少“${config.label}”或“${config.resultHeader}”列，请切换工作表或模式。`);
+      try { planTasks(selected(), mode); status(`已选择${config.label}校验，结果分别写入“${config.resultHeader}”。`); }
+      catch (err) { status(err.message); }
     }
   }
   const savedMode = GM_getValue('checkMode', 'title');
-  if (Object.hasOwn(MODES, savedMode)) el('mode').value = savedMode;
+  if (Object.hasOwn(RUN_MODES, savedMode)) el('mode').value = savedMode;
   el('mode').onchange = el('sheet').onchange = modeChanged;
   modeChanged();
   function controls() {
@@ -432,21 +444,21 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     let lockedHere = false, failed = false;
     try {
       interval();
-      const sheet = selected(), mode = currentMode(), config = MODES[mode];
-      const tasks = tasksFor(sheet, mode, el('skip').checked);
+      const sheet = selected(), mode = currentMode(), config = RUN_MODES[mode];
+      const tasks = planTasks(sheet, mode, el('skip').checked);
       if (!tasks.length) { status(`没有待检测的${config.label}。请确认该列有内容，或取消“跳过当前模式已有结果”后重新检测。`); return; }
       running = true; stop = false; controls();
       const ctx = await rpc('context');
-      if (!confirm(`校验模式：${config.label} → ${config.resultHeader}\n检测范围：${ctx}\n工作表：${sheet.name}，待检测 ${tasks.length} 条。\n检测期间请勿切换标签或修改平台/店铺。开始吗？`)) return;
+      if (!confirm(`校验模式：${config.label} → ${config.resultHeader}\n检测范围：${ctx}\n工作表：${sheet.name}，待搜索 ${tasks.length} 次。\n检测期间请勿切换标签或修改平台/店铺。开始吗？`)) return;
       await rpc('lock'); lockedHere = true;
       el('progress').max = tasks.length; el('progress').value = 0;
       for (let i = 0; i < tasks.length && !stop; i++) {
-        const item = tasks[i];
-        status(`${ctx}\n${config.label}校验 → ${config.resultHeader}\n${i + 1}/${tasks.length}，Excel 第${item.row}行\n${item[mode]}\n检测中…`);
-        try { item.results[mode] = (await rpc('check', { mode, keyword: item[mode] })).text; }
-        catch (err) { item.results[mode] = `检测失败：${err.message}`; failed = true; stop = true; }
+        const { item, mode: taskMode } = tasks[i], taskConfig = MODES[taskMode];
+        status(`${ctx}\n${taskConfig.label}校验 → ${taskConfig.resultHeader}\n${i + 1}/${tasks.length}次，Excel 第${item.row}行\n${item[taskMode]}\n检测中…`);
+        try { item.results[taskMode] = (await rpc('check', { mode: taskMode, keyword: item[taskMode] })).text; }
+        catch (err) { item.results[taskMode] = `检测失败：${err.message}`; failed = true; stop = true; }
         dirty = true; el('progress').value = i + 1;
-        status(`${i + 1}/${tasks.length}，${config.resultHeader}：${item.results[mode]}\n${item[mode]}`);
+        status(`${i + 1}/${tasks.length}次，${taskConfig.resultHeader}：${item.results[taskMode]}\n${item[taskMode]}`);
         if (!stop && i + 1 < tasks.length) {
           const since = Date.now();
           while (!stop && Date.now() - since < interval() * 1000) await sleep(100);
