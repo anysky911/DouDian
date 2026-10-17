@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         抖店检查V1.1.1
+// @name         抖店检查V1.2.0
 // @namespace    anysky911.doudian.check
-// @version      1.1.1
-// @description  选择平台店铺后，按可设置的频率逐条搜索 Excel 商品标题，将结果写入测试结果列并保存。
+// @version      1.2.0
+// @description  选择商品标题或货号校验模式，逐条搜索 Excel 内容，将结果分别写入标题结果或货号结果列并保存。
 // @homepageURL  https://github.com/anysky911/DouDian
 // @downloadURL  https://raw.githubusercontent.com/anysky911/DouDian/main/doudian-check.user.js
 // @updateURL    https://raw.githubusercontent.com/anysky911/DouDian/main/doudian-check.user.js
@@ -37,7 +37,8 @@ https://github.com/nodeca/pako/blob/main/LICENSE
 
 
 /* 使用：在店铺商品管理（极速版）选好平台、店铺、上架状态等条件，
- * 选择 D:\work\影刀\缓存 中的 .xlsx，设置检测间隔，点击开始。
+ * 选择商品标题或货号模式及 .xlsx，设置检测间隔，点击开始。
+ * 商品标题 → 标题结果；货号 → 货号结果。按表头识别列，切换模式保留两列结果。
  * 有商品/无商品仅表示当前筛选条件下的标题搜索结果，不代表跨店同款判定。
  * 文件选择器由浏览器管理，首次请手动进入缓存目录。支持原文件保存及下载副本。
  * 后续版本递增 @version，保持 namespace、文件名、更新地址不变。
@@ -45,7 +46,11 @@ https://github.com/nodeca/pako/blob/main/LICENSE
  */
 (() => {
   'use strict';
-  const VERSION = '1.1.1', CHANNEL = 'doudian-check-1';
+  const VERSION = '1.2.0', CHANNEL = 'doudian-check-1';
+  const MODES = {
+    title: { label: '商品标题', resultHeader: '标题结果', searchLabel: '商品名称' },
+    sku: { label: '货号', resultHeader: '货号结果', searchLabel: '款式编码' }
+  };
   const clean = x => String(x ?? '').trim();
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const visible = e => !!e && e.isConnected && e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
@@ -76,7 +81,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     return f;
   }
   function fingerprint() {
-    return [...form().querySelectorAll('input')].filter(e => e.id !== 'shopGoodsImportQuery_itemName')
+    return [...form().querySelectorAll('input')].filter(e => e.id !== 'shopGoodsImportQuery_itemName' && !e.matches('#shopGoodsImportQuery_styleCode input:not([role="combobox"])'))
       .map(e => [e.id || e.name || e.placeholder, e.value, e.checked]).concat(
         [...form().querySelectorAll('.ant-select-selection-item')].map(e => e.textContent)).map(x => JSON.stringify(x)).join('|');
   }
@@ -85,7 +90,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     const shop = query('#shopGoodsImportQuery_shopIds')?.value;
     if (!shop || !/已选[1-9]/.test(shop)) throw new Error('请先选择平台和店铺');
     const status = query('#shopGoodsImportQuery_enabledStatus')?.closest('.ant-select')?.textContent || '全部状态';
-    return `${shop}；${clean(status)}；沿用页面所有筛选条件`;
+    return `${shop}；${clean(status)}；标题/款式编码由校验模式控制，其余筛选沿用页面`;
   }
   function setLock(value) {
     if (value) {
@@ -115,19 +120,25 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     return null;
   }
   function loading() { return all('.art-loading-indicator-wrapper,.ant-spin-spinning').some(visible); }
-  async function checkTitle(title) {
+  async function checkTitle(payload) {
+    const { mode, keyword } = typeof payload === 'string' ? { mode: 'title', keyword: payload } : payload || {};
+    if (!Object.hasOwn(MODES, mode) || typeof keyword !== 'string' || !clean(keyword)) throw new Error('校验模式无效或搜索内容为空');
     if (!locked || busyQuery) throw new Error('检测状态异常，请暂停后重新开始');
     if (fingerprint() !== baseline) throw new Error('筛选条件发生变化，请重新开始');
     if (loading()) throw new Error('页面仍在加载，请稍后重试');
     busyQuery = true;
     let observer;
     try {
-      const input = query('#shopGoodsImportQuery_itemName');
-      if (!input || !title) throw new Error('商品标题为空或搜索框不存在');
+      const titleInput = query('#shopGoodsImportQuery_itemName');
+      const skuInput = query('#shopGoodsImportQuery_styleCode input:not([role="combobox"])');
+      const input = mode === 'title' ? titleInput : skuInput, other = mode === 'title' ? skuInput : titleInput;
+      if (!visible(input) || input.disabled || input.readOnly || !visible(other) || other.disabled || other.readOnly) throw new Error('商品名称或款式编码搜索框不可用');
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-      setter.call(input, title);
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
+      for (const [field, value] of [[other, ''], [input, keyword]]) {
+        setter.call(field, value);
+        field.dispatchEvent(new Event('input', { bubbles: true }));
+        field.dispatchEvent(new Event('change', { bubbles: true }));
+      }
       await sleep(120);
       const button = [...form().querySelectorAll('button')].find(e => e.textContent.replace(/\s/g, '') === '搜索');
       if (!button || button.disabled) throw new Error('找不到可用的搜索按钮');
@@ -150,7 +161,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       while (Date.now() < deadline) {
         await sleep(100);
         if (error) throw new Error(error);
-        if (!input.isConnected || input.value !== title) throw new Error('页面或搜索标题发生变化');
+        if (!input.isConnected || input.value !== keyword || !other.isConnected || other.value) throw new Error('页面或搜索内容发生变化');
         if (fingerprint() !== baseline) throw new Error('筛选条件发生变化');
         if (loading()) { sawLoading = true; stableSince = 0; continue; }
         const result = resultState();
@@ -225,29 +236,49 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       const source = await read(path), doc = xml(source), rows = tags(doc, 'row');
       for (const header of rows.slice(0, 20)) {
         const cells = tags(header, 'c');
-        const titles = cells.filter(c => clean(cellText(c, strings)) === '商品标题');
-        const results = cells.filter(c => clean(cellText(c, strings)) === '测试结果');
-        if (!titles.length) continue;
-        if (titles.length !== 1 || results.length !== 1) throw new Error(`工作表「${sheet.getAttribute('name')}」必须有唯一的商品标题、测试结果列`);
-        const titleCol = column(titles[0].getAttribute('r')), resultCol = column(results[0].getAttribute('r'));
+        if (!cells.some(c => Object.values(MODES).some(m => clean(cellText(c, strings)) === m.label))) continue;
+        const columns = {};
+        for (const [mode, config] of Object.entries(MODES)) {
+          const inputs = cells.filter(c => clean(cellText(c, strings)) === config.label);
+          const results = cells.filter(c => clean(cellText(c, strings)) === config.resultHeader);
+          if (inputs.length > 1 || results.length > 1) throw new Error(`工作表「${sheet.getAttribute('name')}」的${config.label}、${config.resultHeader}表头不能重复`);
+          if (inputs.length === 1 && results.length === 1) columns[mode] = {
+            input: column(inputs[0].getAttribute('r')), result: column(results[0].getAttribute('r'))
+          };
+        }
+        if (!Object.keys(columns).length) throw new Error(`工作表「${sheet.getAttribute('name')}」需包含“商品标题、标题结果”或“货号、货号结果”列`);
         const items = rows.filter(r => Number(r.getAttribute('r')) > Number(header.getAttribute('r'))).map(r => {
           const cs = tags(r, 'c'), row = Number(r.getAttribute('r'));
-          const title = clean(cellText(cs.find(c => column(c.getAttribute('r')) === titleCol), strings));
-          const old = clean(cellText(cs.find(c => column(c.getAttribute('r')) === resultCol), strings));
-          return { row, title, old, result: '' };
-        }).filter(r => r.title);
-        sheets.push({ name: sheet.getAttribute('name'), path, source, doc, resultCol, items });
+          const item = { row, old: {}, results: {} };
+          for (const [mode, cols] of Object.entries(columns)) {
+            item[mode] = clean(cellText(cs.find(c => column(c.getAttribute('r')) === cols.input), strings));
+            item.old[mode] = clean(cellText(cs.find(c => column(c.getAttribute('r')) === cols.result), strings));
+            item.results[mode] = '';
+          }
+          return item;
+        }).filter(r => Object.keys(columns).some(mode => r[mode]));
+        sheets.push({ name: sheet.getAttribute('name'), path, source, doc, columns, items });
         break;
       }
     }
-    if (!sheets.length) throw new Error('前20行未找到“商品标题”和“测试结果”表头');
+    if (!sheets.length) throw new Error('前20行未找到“商品标题、标题结果”或“货号、货号结果”表头');
     return { file, bytes, zip, sheets };
+  }
+  function tasksFor(sheet, mode, skip = true) {
+    const config = MODES[mode];
+    if (!config) throw new Error('请选择有效的校验模式');
+    if (!sheet?.columns[mode]) throw new Error(`当前工作表需包含唯一的“${config.label}”和“${config.resultHeader}”列`);
+    return sheet.items.filter(item => {
+      const result = item.results[mode] || item.old[mode];
+      return item[mode] && (!skip || !result || result.startsWith('检测失败'));
+    });
   }
   function patchSheet(sheet) {
     // Patch only result cells in the original XML, leaving all other cells/formatting untouched.
     let source = sheet.source;
-    for (const item of sheet.items.filter(i => i.result)) {
-      const ref = `${sheet.resultCol}${item.row}`;
+    for (const item of sheet.items) for (const [mode, cols] of Object.entries(sheet.columns)) {
+      if (!item.results[mode]) continue;
+      const ref = `${cols.result}${item.row}`;
       const rowPattern = new RegExp(`<row\\b[^>]*\\br="${item.row}"[^>]*>[\\s\\S]*?<\\/row>`);
       const match = source.match(rowPattern);
       if (!match) throw new Error(`找不到第${item.row}行`);
@@ -255,12 +286,12 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       const cellPattern = new RegExp(`<c\\b[^>]*\\br="${ref}"[^>]*?(?:\\/>|>[\\s\\S]*?<\\/c>)`);
       const existing = oldRow.match(cellPattern)?.[0];
       const style = existing?.match(/\bs="([^"]*)"/)?.[1];
-      const escaped = item.result.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const escaped = item.results[mode].replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
       const replacement = `<c r="${ref}"${style ? ` s="${style}"` : ''} t="inlineStr"><is><t>${escaped}</t></is></c>`;
       let updated;
       if (existing) updated = oldRow.replace(cellPattern, () => replacement);
       else {
-        const after = [...oldRow.matchAll(/<c\b[^>]*\br="([A-Z]+)\d+"/g)].find(m => columnNo(m[1]) > columnNo(sheet.resultCol));
+        const after = [...oldRow.matchAll(/<c\b[^>]*\br="([A-Z]+)\d+"/g)].find(m => columnNo(m[1]) > columnNo(cols.result));
         const index = after ? after.index : oldRow.lastIndexOf('</row>');
         updated = oldRow.slice(0, index) + replacement + oldRow.slice(index);
       }
@@ -270,7 +301,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     return source;
   }
   // Exposed only for offline tests, never on the web page's global scope.
-  if (typeof module !== 'undefined' && module.exports) { module.exports = { openWorkbook, patchSheet, cellText, columnNo, resultState, checkTitle, setLock }; return; }
+  if (typeof module !== 'undefined' && module.exports) { module.exports = { openWorkbook, patchSheet, tasksFor, cellText, columnNo, resultState, checkTitle, setLock }; return; }
 
   const host = document.createElement('div'); host.id = 'dd-check-panel';
   host.style.cssText = 'position:fixed;right:18px;top:110px;z-index:2147483647';
@@ -285,12 +316,14 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   #status{background:#f2f6fb;padding:9px;border-radius:6px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;max-height:180px;overflow:auto}
   label{font-size:12px}progress{width:100%;margin:6px 0}#min{border:0;color:white;background:transparent;padding:0 6px}#custom{width:78px}
   </style><section class="box"><header><span>抖店检查V${VERSION}</span><button id="min">收起</button></header><main>
-  <p>① 先在页面设置平台、店铺和筛选条件。<br>② 选择 D:\\work\\影刀\\缓存 中的 Excel。<br>结果仅表示当前筛选条件下的标题搜索结果。</p>
+  <p>① 先在页面设置平台、店铺和筛选条件。<br>② 选择校验模式和 Excel。<br>标题查商品名称，货号查款式编码；自动清空另一个搜索框。结果仅表示当前筛选条件下的搜索结果。</p>
+  <div class="row"><label for="mode">校验模式</label><select id="mode"><option value="title">商品标题</option><option value="sku">货号</option></select></div>
+  <p id="mapping"></p>
   <div class="row"><button id="pick" class="primary">选择表格</button><button id="fallback">普通选择</button></div>
   <select id="sheet" disabled><option>尚未选择 .xlsx 文件</option></select>
   <div class="row"><label>检测间隔</label><select id="interval"><option value="1">1 秒</option><option value="2">2 秒</option><option value="3" selected>3 秒</option><option value="5">5 秒</option><option value="10">10 秒</option><option value="custom">自定义</option></select><input id="custom" type="number" min="0.5" max="300" step="0.5" value="3" hidden><label id="unit" hidden>秒</label></div>
   <p>每条加载完成后再等待；间隔可在运行中调整。</p>
-  <label><input type="checkbox" id="skip" checked> 跳过已有测试结果（失败项会重试）</label><br>
+  <label><input type="checkbox" id="skip" checked> 跳过当前模式已有结果（失败项会重试）</label><br>
   <label><input type="checkbox" id="overwrite" checked> 完成后保存到原文件（需浏览器授权）</label>
   <div class="row"><button id="start" class="primary" disabled>开始 / 继续</button><button id="pause" disabled>暂停</button><button id="save" disabled>保存结果</button><button id="download" disabled>下载副本</button></div>
   <progress id="progress" max="1" value="0"></progress><div id="status">等待选择表格。首次选择请手动进入缓存目录。</div>
@@ -301,8 +334,23 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   let workbook = null, fileHandle = null, running = false, stop = false, dirty = false, saving = false, importing = false;
   const status = text => { el('status').textContent = text; };
   const selected = () => workbook?.sheets[Number(el('sheet').value)];
+  const currentMode = () => el('mode').value;
+  function modeChanged() {
+    const mode = currentMode(), config = MODES[mode];
+    GM_setValue('checkMode', mode);
+    el('mapping').textContent = `读取“${config.label}” → 搜索“${config.searchLabel}” → 写入“${config.resultHeader}”`;
+    if (workbook) {
+      for (const [i, sheet] of workbook.sheets.entries()) el('sheet').options[i].textContent = `${sheet.name}（${sheet.items.filter(item => item[mode]).length}条${config.label}）`;
+      el('progress').value = 0;
+      status(selected()?.columns[mode] ? `已选择${config.label}校验，结果写入“${config.resultHeader}”。` : `当前工作表缺少“${config.label}”或“${config.resultHeader}”列，请切换工作表或模式。`);
+    }
+  }
+  const savedMode = GM_getValue('checkMode', 'title');
+  if (Object.hasOwn(MODES, savedMode)) el('mode').value = savedMode;
+  el('mode').onchange = el('sheet').onchange = modeChanged;
+  modeChanged();
   function controls() {
-    for (const id of ['pick', 'fallback', 'sheet', 'skip']) el(id).disabled = running || saving || importing;
+    for (const id of ['pick', 'fallback', 'sheet', 'mode', 'skip']) el(id).disabled = running || saving || importing;
     el('start').disabled = !workbook || running || saving || importing;
     el('pause').disabled = !running;
     for (const id of ['save', 'download']) el(id).disabled = !workbook || running || saving || importing;
@@ -329,6 +377,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     const next = await withTimeout(openWorkbook(file, status), 45000, '导入 Excel');
     workbook = next; fileHandle = handle; dirty = false;
     el('sheet').replaceChildren(...next.sheets.map((s, i) => { const o = document.createElement('option'); o.value = i; o.textContent = `${s.name}（${s.items.length}条）`; return o; }));
+    modeChanged();
     el('overwrite').checked = !!handle;
     el('progress').value = 0;
     status(`${file.name}\n已读取 ${next.sheets.length} 个可检测工作表。${handle ? '支持保存原文件。' : '普通选择模式：完成后下载结果副本。'}`);
@@ -346,11 +395,12 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   };
   el('fallback').onclick = () => { if (mayReplace()) el('file').click(); };
   el('file').onchange = async e => {
-    try { if (e.target.files[0]) await load(e.target.files[0], null); } catch (err) { status(err.message); }
-    e.target.value = '';
+    const input = e.currentTarget;
+    try { if (input.files[0]) await load(input.files[0], null); } catch (err) { status(err.message); }
+    finally { input.value = ''; }
   };
   async function exportBlob() {
-    for (const s of workbook.sheets) if (s.items.some(i => i.result)) workbook.zip.file(s.path, patchSheet(s));
+    for (const s of workbook.sheets) if (s.items.some(i => Object.values(i.results).some(Boolean))) workbook.zip.file(s.path, patchSheet(s));
     return withTimeout(workbook.zip.generateAsync({ type: 'blob', compression: 'DEFLATE', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), 45000, '生成结果文件');
   }
   async function save(copy = false) {
@@ -382,29 +432,28 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     let lockedHere = false, failed = false;
     try {
       interval();
-      const sheet = selected();
-      if (!sheet?.items.length) throw new Error('当前工作表没有商品标题');
-      const tasks = sheet.items.filter(i => !el('skip').checked || !(i.result || i.old) || (i.result || i.old).startsWith('检测失败'));
-      if (!tasks.length) { status('没有待检测商品。可取消“跳过已有测试结果”后重新检测。'); return; }
+      const sheet = selected(), mode = currentMode(), config = MODES[mode];
+      const tasks = tasksFor(sheet, mode, el('skip').checked);
+      if (!tasks.length) { status(`没有待检测的${config.label}。请确认该列有内容，或取消“跳过当前模式已有结果”后重新检测。`); return; }
       running = true; stop = false; controls();
       const ctx = await rpc('context');
-      if (!confirm(`检测范围：${ctx}\n工作表：${sheet.name}，待检测 ${tasks.length} 条。\n检测期间请勿切换标签或修改平台/店铺。开始吗？`)) return;
+      if (!confirm(`校验模式：${config.label} → ${config.resultHeader}\n检测范围：${ctx}\n工作表：${sheet.name}，待检测 ${tasks.length} 条。\n检测期间请勿切换标签或修改平台/店铺。开始吗？`)) return;
       await rpc('lock'); lockedHere = true;
       el('progress').max = tasks.length; el('progress').value = 0;
       for (let i = 0; i < tasks.length && !stop; i++) {
         const item = tasks[i];
-        status(`${ctx}\n${i + 1}/${tasks.length}，Excel 第${item.row}行\n${item.title}\n检测中…`);
-        try { item.result = (await rpc('check', item.title)).text; }
-        catch (err) { item.result = `检测失败：${err.message}`; failed = true; stop = true; }
+        status(`${ctx}\n${config.label}校验 → ${config.resultHeader}\n${i + 1}/${tasks.length}，Excel 第${item.row}行\n${item[mode]}\n检测中…`);
+        try { item.results[mode] = (await rpc('check', { mode, keyword: item[mode] })).text; }
+        catch (err) { item.results[mode] = `检测失败：${err.message}`; failed = true; stop = true; }
         dirty = true; el('progress').value = i + 1;
-        status(`${i + 1}/${tasks.length}：${item.result}\n${item.title}`);
+        status(`${i + 1}/${tasks.length}，${config.resultHeader}：${item.results[mode]}\n${item[mode]}`);
         if (!stop && i + 1 < tasks.length) {
           const since = Date.now();
           while (!stop && Date.now() - since < interval() * 1000) await sleep(100);
         }
       }
       if (!stop) await save();
-      else status(failed ? '检测异常，已暂停。失败原因已写入测试结果；请检查页面后继续，或保存当前结果。' : '已暂停。可继续检测，或保存当前结果。');
+      else status(failed ? `检测异常，已暂停。失败原因已写入${config.resultHeader}；请检查页面后继续，或保存当前结果。` : '已暂停。可继续检测，或保存当前结果。');
     } catch (err) { status(err.message); }
     finally {
       if (lockedHere) { try { await rpc('unlock'); } catch (err) { status(`${el('status').textContent}\n页面解锁失败：${err.message}`); } }
