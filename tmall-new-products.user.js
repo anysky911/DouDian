@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         DouDian 天猫新品采集表
 // @namespace    doudian.local
-// @version      1.3.0
+// @version      1.3.1
 // @homepageURL  https://github.com/anysky911/DouDian
 // @downloadURL  https://raw.githubusercontent.com/anysky911/DouDian/main/tmall-new-products.user.js
 // @updateURL    https://raw.githubusercontent.com/anysky911/DouDian/main/tmall-new-products.user.js
-// @description  采集店名、标题和链接，按新版表头预留货号及三列结果，自动适配行列尺寸并导出 Excel。
+// @description  采集店名、标题和链接，从标题识别货号，三列结果留空，自动适配行列尺寸并导出 Excel。
 // @match        https://*.tmall.com/*
 // @run-at       document-idle
 // @noframes
@@ -106,8 +106,29 @@
     if (/^[\s\uFEFF]*[=+@-]/.test(s)) s = "'" + s;
     return '"' + s.replace(/"/g, '""') + '"';
   }
+  function extractSku(title) {
+    const text = clean(title).normalize('NFKC');
+    // 有明确货号标签时优先；不把年份、尺寸、克重等普通数字当成货号。
+    const marked = [...text.matchAll(/(?:货号|款号|款式编码|商品编码)\s*[:：#]?\s*([A-Za-z0-9]+(?:[-+_][A-Za-z0-9]+)*)/g)]
+      .map(m => m[1]).filter(s => s.length <= 40 && /\d/.test(s));
+    const unique = values => [...new Set(values)];
+    if (marked.length) return unique(marked).length === 1 ? marked[0] : '';
+    const candidates = [];
+    for (const m of text.matchAll(/[A-Za-z0-9]+(?:[-+_][A-Za-z0-9]+)*/g)) {
+      const value = m[0];
+      if (value.length > 40) continue;
+      const suffix = text.slice(m.index + value.length);
+      if (/^(?:cm|mm|kg|g|厘米|毫米|公斤|克|斤|码|岁|件|条|元|%)/i.test(suffix)) continue;
+      if (/^[A-Za-z]{1,8}[-_]?\d{3,}[A-Za-z]?(?:[-+_][A-Za-z0-9]+)*$/.test(value) ||
+          (/^\d{6,20}(?:[-+_][A-Za-z0-9]+)*$/.test(value) && !/^(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:[0-3]\d)?$/.test(value))) {
+        candidates.push(value);
+      }
+    }
+    const found = unique(candidates);
+    return found.length === 1 ? found[0] : '';
+  }
   const headers = ['店铺名称', '商品标题', '货号', '标题结果', '货号结果', '数字', '商品链接', '商品ID', '店铺地址', '采集时间', '来源页面', '列表口径'];
-  const exportRow = r => [r.shop, r.title, r.sku || '', '', '', '', r.url, r.id, r.shopUrl, r.time, r.source, '用户确认的新品排序列表'].map(v => String(v ?? ''));
+  const exportRow = r => [r.shop, r.title, r.sku || extractSku(r.title), '', '', '', r.url, r.id, r.shopUrl, r.time, r.source, '用户确认的新品排序列表'].map(v => String(v ?? ''));
   function csv(rows) {
     return '\uFEFF' + [
       headers,
@@ -173,7 +194,7 @@
     });
   }
   if (typeof module === 'object' && module.exports) {
-    module.exports = { productUrl, fromProps, csv, csvCell, collect, xlsx, exportName };
+    module.exports = { productUrl, fromProps, csv, csvCell, collect, xlsx, exportName, extractSku };
     return;
   }
   if (['detail', 'login', 'list', 'cart', 'www'].includes(location.hostname.split('.')[0])) return;
@@ -192,7 +213,7 @@
       input[type=text]{width:100%;padding:7px;border:1px solid #ccc;border-radius:5px;margin:4px 0 8px} input[type=number]{width:65px} .row{display:flex;gap:7px;flex-wrap:wrap;margin:9px 0} .muted{font-size:12px;color:#667085}.status{white-space:pre-wrap;margin:9px 0;max-height:130px;overflow:auto}.hide{display:none!important} .min{float:right;padding:0 7px} a{color:#155cc5} .shops{display:flex;gap:12px;font-size:12px}
       .overlay{position:fixed;inset:5vh 4vw;z-index:2147483647;background:#fff;border:1px solid #ccc;box-shadow:0 5px 40px #0005;border-radius:10px;padding:18px;display:flex;flex-direction:column;font:14px/1.5 system-ui,sans-serif;color:#17212f}.scroll{overflow:auto;flex:1}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:8px;text-align:left}th{position:sticky;top:0;background:#f0f2f5}td:nth-child(2){min-width:240px}td:nth-child(3){min-width:120px}td:nth-child(7){word-break:break-all}td{white-space:normal;overflow-wrap:anywhere;vertical-align:middle} .head{display:flex;justify-content:space-between;margin-bottom:12px}
     </style>
-    <section class="panel"><button class="min" id="min">收起</button><h3>DouDian · 新品表 v1.3.0</h3>
+    <section class="panel"><button class="min" id="min">收起</button><h3>DouDian · 新品表 v1.3.1</h3>
     <div id="body"><label>店铺名称<input type="text" id="shop" placeholder="请确认或输入店铺名称"></label>
     <label><input id="confirmed" type="checkbox"> 我已进入本店商品列表并选择“新品”</label>
     <div class="muted">仅采集当前列表；新品排序不等于近期上架。可手动翻页后继续采集。</div>
@@ -326,7 +347,7 @@
     const a = document.createElement('a'); a.href = url;
     a.download = exportName(rows);
     shadow.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000);
-    status(`已生成 ${a.download}，请查看浏览器下载列表。\n标题结果、货号结果、数字列留空，列宽和行高已按内容适配。`);
+    status(`已生成 ${a.download}，请查看浏览器下载列表。\n货号从标题识别，无法确定时留空；标题结果、货号结果、数字列留空。`);
   });
   $('clear').onclick = safe(() => {
     if (!confirm('清空所有店铺的采集数据？此操作不能撤销，请先导出。')) return;
