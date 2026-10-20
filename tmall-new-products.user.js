@@ -1,18 +1,21 @@
 // ==UserScript==
 // @name         DouDian 天猫新品采集表
 // @namespace    doudian.local
-// @version      1.3.1
+// @version      1.4.0
 // @homepageURL  https://github.com/anysky911/DouDian
 // @downloadURL  https://raw.githubusercontent.com/anysky911/DouDian/main/tmall-new-products.user.js
 // @updateURL    https://raw.githubusercontent.com/anysky911/DouDian/main/tmall-new-products.user.js
-// @description  采集店名、标题和链接，从标题识别货号，三列结果留空，自动适配行列尺寸并导出 Excel。
+// @description  采集店名、标题和链接，从详情页首个颜色分类提取货号并统一添加IN，三列结果留空，自动适配行列尺寸并导出 Excel。
 // @match        https://*.tmall.com/*
+// @match        https://detail.tmall.hk/*
+// @match        https://item.taobao.com/item.htm*
 // @run-at       document-idle
 // @noframes
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_listValues
 // @grant        GM_deleteValue
+// @grant        GM_openInTab
 // ==/UserScript==
 
 (() => {
@@ -106,29 +109,29 @@
     if (/^[\s\uFEFF]*[=+@-]/.test(s)) s = "'" + s;
     return '"' + s.replace(/"/g, '""') + '"';
   }
-  function extractSku(title) {
-    const text = clean(title).normalize('NFKC');
-    // 有明确货号标签时优先；不把年份、尺寸、克重等普通数字当成货号。
-    const marked = [...text.matchAll(/(?:货号|款号|款式编码|商品编码)\s*[:：#]?\s*([A-Za-z0-9]+(?:[-+_][A-Za-z0-9]+)*)/g)]
-      .map(m => m[1]).filter(s => s.length <= 40 && /\d/.test(s));
-    const unique = values => [...new Set(values)];
-    if (marked.length) return unique(marked).length === 1 ? marked[0] : '';
-    const candidates = [];
-    for (const m of text.matchAll(/[A-Za-z0-9]+(?:[-+_][A-Za-z0-9]+)*/g)) {
-      const value = m[0];
-      if (value.length > 40) continue;
-      const suffix = text.slice(m.index + value.length);
-      if (/^(?:cm|mm|kg|g|厘米|毫米|公斤|克|斤|码|岁|件|条|元|%)/i.test(suffix)) continue;
-      if (/^[A-Za-z]{1,8}[-_]?\d{3,}[A-Za-z]?(?:[-+_][A-Za-z0-9]+)*$/.test(value) ||
-          (/^\d{6,20}(?:[-+_][A-Za-z0-9]+)*$/.test(value) && !/^(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:[0-3]\d)?$/.test(value))) {
-        candidates.push(value);
-      }
+  function extractSku(color) {
+    const text = clean(color).normalize('NFKC').replace(/【[^】]*】|\[[^\]]*\]|（[^）]*）|\([^)]*\)/g, ' ');
+    const codes = [];
+    for (const m of text.matchAll(/(?:[A-Za-z]{1,8}[-_]?)?\d{3,20}[A-Za-z]?(?:[-_]\d{3,20})?/g)) {
+      const tail = text.slice(m.index + m[0].length);
+      if (/^(?:厘米|毫米|公斤|克|斤|码|岁|件|条|元|%)/.test(tail) || /^\d+(?:cm|mm|kg|g)(?:\b|[\u4e00-\u9fff])/i.test(m[0] + tail)) continue;
+      codes.push(m[0].replace(/^IN/i, ''));
     }
-    const found = unique(candidates);
-    return found.length === 1 ? found[0] : '';
+    return codes.length ? 'IN' + codes.join('+') : '';
   }
+  function firstColor(doc) {
+    // 只读购买区颜色分类的第一个选项，不使用选中项或参数区汇总文字。
+    for (const label of doc.querySelectorAll('[title="颜色分类"]')) {
+      const group = label.closest('[class*="skuItemClipX--"]');
+      if (!group) continue;
+      const first = group.querySelector('[class*="valueItemText--"]');
+      if (first) return clean(first.getAttribute('title') || first.textContent);
+    }
+    return null;
+  }
+  const skuCacheKey = id => `doudian.sku.first-color.v1.${id}`;
   const headers = ['店铺名称', '商品标题', '货号', '标题结果', '货号结果', '数字', '商品链接', '商品ID', '店铺地址', '采集时间', '来源页面', '列表口径'];
-  const exportRow = r => [r.shop, r.title, r.sku || extractSku(r.title), '', '', '', r.url, r.id, r.shopUrl, r.time, r.source, '用户确认的新品排序列表'].map(v => String(v ?? ''));
+  const exportRow = r => [r.shop, r.title, r.sku || '', '', '', '', r.url, r.id, r.shopUrl, r.time, r.source, '用户确认的新品排序列表'].map(v => String(v ?? ''));
   function csv(rows) {
     return '\uFEFF' + [
       headers,
@@ -194,10 +197,30 @@
     });
   }
   if (typeof module === 'object' && module.exports) {
-    module.exports = { productUrl, fromProps, csv, csvCell, collect, xlsx, exportName, extractSku };
+    module.exports = { productUrl, fromProps, csv, csvCell, collect, xlsx, exportName, extractSku, firstColor };
     return;
   }
-  if (['detail', 'login', 'list', 'cart', 'www'].includes(location.hostname.split('.')[0])) return;
+  if (['detail.tmall.com', 'detail.tmall.hk', 'item.taobao.com'].includes(location.hostname)) {
+    const item = productUrl(location.href);
+    if (!item) return;
+    const task = new URLSearchParams(location.hash.slice(1)).get('doudian-sku');
+    let last = null, stableSince = 0, finished = false;
+    const started = Date.now();
+    const timer = setInterval(() => {
+      const color = firstColor(document);
+      if (color !== last) { last = color; stableSince = Date.now(); }
+      if (color && Date.now() - stableSince >= 1200) {
+        GM_setValue(skuCacheKey(item.id), { color, sku: extractSku(color), time: Date.now(), task, ok: true });
+        finished = true;
+      } else if (Date.now() - started > 25000) {
+        if (task) GM_setValue(skuCacheKey(item.id), { sku: '', time: Date.now(), task, ok: false });
+        finished = true;
+      }
+      if (finished) clearInterval(timer);
+    }, 400);
+    return;
+  }
+  if (['login', 'list', 'cart', 'www'].includes(location.hostname.split('.')[0])) return;
   if (document.getElementById('doudian-collector')) return;
   const prefix = 'doudian.product.v1.';
   const shopKey = `doudian.shop.${location.hostname}`;
@@ -213,14 +236,15 @@
       input[type=text]{width:100%;padding:7px;border:1px solid #ccc;border-radius:5px;margin:4px 0 8px} input[type=number]{width:65px} .row{display:flex;gap:7px;flex-wrap:wrap;margin:9px 0} .muted{font-size:12px;color:#667085}.status{white-space:pre-wrap;margin:9px 0;max-height:130px;overflow:auto}.hide{display:none!important} .min{float:right;padding:0 7px} a{color:#155cc5} .shops{display:flex;gap:12px;font-size:12px}
       .overlay{position:fixed;inset:5vh 4vw;z-index:2147483647;background:#fff;border:1px solid #ccc;box-shadow:0 5px 40px #0005;border-radius:10px;padding:18px;display:flex;flex-direction:column;font:14px/1.5 system-ui,sans-serif;color:#17212f}.scroll{overflow:auto;flex:1}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:8px;text-align:left}th{position:sticky;top:0;background:#f0f2f5}td:nth-child(2){min-width:240px}td:nth-child(3){min-width:120px}td:nth-child(7){word-break:break-all}td{white-space:normal;overflow-wrap:anywhere;vertical-align:middle} .head{display:flex;justify-content:space-between;margin-bottom:12px}
     </style>
-    <section class="panel"><button class="min" id="min">收起</button><h3>DouDian · 新品表 v1.3.1</h3>
+    <section class="panel"><button class="min" id="min">收起</button><h3>DouDian · 新品表 v1.4.0</h3>
     <div id="body"><label>店铺名称<input type="text" id="shop" placeholder="请确认或输入店铺名称"></label>
     <label><input id="confirmed" type="checkbox"> 我已进入本店商品列表并选择“新品”</label>
     <div class="muted">仅采集当前列表；新品排序不等于近期上架。可手动翻页后继续采集。</div>
     <div class="row"><button id="scan" class="primary">采集当前列表</button><button id="run">滚动采集</button><button id="stop" disabled>停止</button></div>
     <label class="muted">滚动最多 <input id="rounds" type="number" min="1" max="100" value="30"> 次（每次约 1.5 秒）</label>
     <div id="status" class="status">等待采集。请先登录天猫并选择“新品”。</div><div id="count" class="muted"></div>
-    <div class="row"><button id="preview">查看表格</button><button id="export">导出 Excel</button><button id="clear">清空全部</button></div>
+    <div class="row"><button id="preview">查看表格</button><button id="sku">补采货号</button><button id="export">导出 Excel</button><button id="clear">清空全部</button></div>
+    <div class="muted">导出前逐个打开详情页，读取首个颜色分类并加 IN 前缀。读取失败时停止，未识别货号留空。</div>
     <div class="shops"><a href="https://amencl.tmall.com/" target="_blank" rel="noopener noreferrer">amencl</a><a href="https://xiaozhubite.tmall.com/" target="_blank" rel="noopener noreferrer">xiaozhubite</a><a href="https://mcticco.tmall.com/" target="_blank" rel="noopener noreferrer">mcticco</a></div>
     <p class="muted">数据保存在本机篡改猴中，三家店可累计导出。建议依次采集，导出后再清空。</p></div></section>
     <section class="overlay hide" id="overlay"><div class="head"><strong id="tableTitle">采集结果</strong><button id="close">关闭</button></div><div class="scroll"><table><thead><tr>${headers.map(h => `<th>${xml(h)}</th>`).join('')}</tr></thead><tbody id="rows"></tbody></table></div></section>`;
@@ -237,7 +261,9 @@
   }
   $('shop').value = GM_getValue(shopKey, '') || inferShop();
   function allRows() {
-    return GM_listValues().filter(k => k.startsWith(prefix)).map(k => GM_getValue(k)).filter(r => r?.id && r?.url).sort((a, b) => a.shop.localeCompare(b.shop, 'zh-CN') || a.time.localeCompare(b.time));
+    return GM_listValues().filter(k => k.startsWith(prefix)).map(k => GM_getValue(k)).filter(r => r?.id && r?.url)
+      .map(r => ({ ...r, sku: GM_getValue(skuCacheKey(r.id), null)?.sku || '' }))
+      .sort((a, b) => a.shop.localeCompare(b.shop, 'zh-CN') || a.time.localeCompare(b.time));
   }
   function refreshCount() {
     const rows = allRows();
@@ -298,7 +324,7 @@
     try { check(); } catch (e) { status(e.message); return; }
     const limit = Math.max(1, Math.min(100, Number($('rounds').value) || 30));
     running = true; stopping = false;
-    for (const id of ['scan', 'run', 'clear']) $(id).disabled = true;
+    for (const id of ['scan', 'run', 'clear', 'sku', 'export']) $(id).disabled = true;
     $('stop').disabled = false;
     let stale = 0, total = 0, reason = '已达到滚动次数上限；可继续采集或手动翻页。';
     try {
@@ -317,10 +343,51 @@
     } catch (e) { status(`采集停止：${e.message}`); }
     finally {
       running = false;
-      for (const id of ['scan', 'run', 'clear']) $(id).disabled = false;
+      for (const id of ['scan', 'run', 'clear', 'sku', 'export']) $(id).disabled = false;
       $('stop').disabled = true;
     }
   };
+  async function fillSkus() {
+    const pending = [...new Map(allRows().filter(r => !GM_getValue(skuCacheKey(r.id), null)?.ok).map(r => [r.id, r])).values()];
+    if (!pending.length) return true;
+    for (let i = 0; i < pending.length; i++) {
+      if (stopping) return false;
+      const row = pending[i], link = productUrl(row.url);
+      if (!link || link.id !== row.id) throw new Error('商品链接与ID不一致，已停止补采。');
+      const task = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      status(`补采货号 ${i + 1}/${pending.length}：${row.title}\n等待详情页首个颜色分类…`);
+      const tab = GM_openInTab(`${link.url}#doudian-sku=${task}`, { active: false, insert: true, setParent: true });
+      if (!tab) throw new Error('无法打开详情页，请检查篡改猴权限。');
+      let result = null;
+      try {
+        const until = Date.now() + 35000;
+        while (Date.now() < until && !stopping) {
+          const value = GM_getValue(skuCacheKey(row.id), null);
+          if (value?.task === task) { result = value; break; }
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+      } finally { tab.close(); }
+      if (stopping) return false;
+      if (!result?.ok) throw new Error('详情页未读到颜色分类，可能需要登录或验证。请打开该商品处理后重试；已补采结果保留。');
+    }
+    return true;
+  }
+  async function withSkus(action) {
+    if (running) return;
+    running = true; stopping = false;
+    for (const id of ['scan', 'run', 'clear', 'sku', 'export']) $(id).disabled = true;
+    $('stop').disabled = false;
+    try {
+      if (await fillSkus()) action();
+      else status('已停止补采，已完成的货号保留。');
+    } catch (e) { status(`操作未完成：${e.message}`); }
+    finally {
+      running = false;
+      for (const id of ['scan', 'run', 'clear', 'sku', 'export']) $(id).disabled = false;
+      $('stop').disabled = true;
+    }
+  }
+  $('sku').onclick = () => withSkus(() => status('货号补采完成。无法识别的货号留空，可查看表格或导出。'));
   $('preview').onclick = safe(() => {
     const rows = allRows(); $('rows').replaceChildren();
     $('tableTitle').textContent = `采集结果 · ${rows.length} 条（预览前 1000 条，导出含全部）`;
@@ -340,14 +407,14 @@
     $('overlay').classList.remove('hide');
   });
   $('close').onclick = () => $('overlay').classList.add('hide');
-  $('export').onclick = safe(() => {
+  $('export').onclick = () => withSkus(() => {
     const rows = allRows();
     if (!rows.length) { status('暂无数据，请先采集。'); return; }
     const url = URL.createObjectURL(new Blob([xlsx(rows)], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
     const a = document.createElement('a'); a.href = url;
     a.download = exportName(rows);
     shadow.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000);
-    status(`已生成 ${a.download}，请查看浏览器下载列表。\n货号从标题识别，无法确定时留空；标题结果、货号结果、数字列留空。`);
+    status(`已生成 ${a.download}，请查看浏览器下载列表。\n货号取首个颜色分类并加 IN 前缀；标题结果、货号结果、数字列留空。`);
   });
   $('clear').onclick = safe(() => {
     if (!confirm('清空所有店铺的采集数据？此操作不能撤销，请先导出。')) return;
