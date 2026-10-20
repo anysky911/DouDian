@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DouDian 天猫新品采集表
 // @namespace    doudian.local
-// @version      1.4.0
+// @version      1.4.1
 // @homepageURL  https://github.com/anysky911/DouDian
 // @downloadURL  https://raw.githubusercontent.com/anysky911/DouDian/main/tmall-new-products.user.js
 // @updateURL    https://raw.githubusercontent.com/anysky911/DouDian/main/tmall-new-products.user.js
@@ -145,8 +145,16 @@
     let shop = names.join('+');
     if (shop.length > 100) shop = names[0].slice(0, 70) + `等${names.length}店`;
     shop = shop.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').replace(/[. ]+$/g, '') || '未命名店铺';
-    const day = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).format(date).replace(/-/g, '');
-    return `${shop}_${day}_${rows.length}条.xlsx`;
+    const categories = [...new Set(rows.map(r => clean(r.category) || '全部宝贝'))];
+    let category = categories.join('+');
+    if (category.length > 60) category = categories[0].slice(0, 40) + `等${categories.length}类`;
+    category = category.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').replace(/[. ]+$/g, '') || '全部宝贝';
+    const parts = Object.fromEntries(new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23'
+    }).formatToParts(date).map(p => [p.type, p.value]));
+    const time = `${parts.year}${parts.month}${parts.day}-${parts.hour}${parts.minute}${parts.second}`;
+    return `${shop}_${category}_${time}.xlsx`;
   }
   // 无外部依赖的 ZIP（Store 模式），生成标准 OOXML .xlsx，不使用伪装的 HTML/XLS。
   function zip(files) {
@@ -236,8 +244,9 @@
       input[type=text]{width:100%;padding:7px;border:1px solid #ccc;border-radius:5px;margin:4px 0 8px} input[type=number]{width:65px} .row{display:flex;gap:7px;flex-wrap:wrap;margin:9px 0} .muted{font-size:12px;color:#667085}.status{white-space:pre-wrap;margin:9px 0;max-height:130px;overflow:auto}.hide{display:none!important} .min{float:right;padding:0 7px} a{color:#155cc5} .shops{display:flex;gap:12px;font-size:12px}
       .overlay{position:fixed;inset:5vh 4vw;z-index:2147483647;background:#fff;border:1px solid #ccc;box-shadow:0 5px 40px #0005;border-radius:10px;padding:18px;display:flex;flex-direction:column;font:14px/1.5 system-ui,sans-serif;color:#17212f}.scroll{overflow:auto;flex:1}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:8px;text-align:left}th{position:sticky;top:0;background:#f0f2f5}td:nth-child(2){min-width:240px}td:nth-child(3){min-width:120px}td:nth-child(7){word-break:break-all}td{white-space:normal;overflow-wrap:anywhere;vertical-align:middle} .head{display:flex;justify-content:space-between;margin-bottom:12px}
     </style>
-    <section class="panel"><button class="min" id="min">收起</button><h3>DouDian · 新品表 v1.4.0</h3>
+    <section class="panel"><button class="min" id="min">收起</button><h3>DouDian · 新品表 v1.4.1</h3>
     <div id="body"><label>店铺名称<input type="text" id="shop" placeholder="请确认或输入店铺名称"></label>
+    <label>品类（用于文件名）<input type="text" id="category" placeholder="例如：运动套装、外套、全部宝贝"></label>
     <label><input id="confirmed" type="checkbox"> 我已进入本店商品列表并选择“新品”</label>
     <div class="muted">仅采集当前列表；新品排序不等于近期上架。可手动翻页后继续采集。</div>
     <div class="row"><button id="scan" class="primary">采集当前列表</button><button id="run">滚动采集</button><button id="stop" disabled>停止</button></div>
@@ -260,9 +269,14 @@
     return clean(document.title.replace(/^(首页|所有宝贝|所有商品|本店搜索|店内搜索)[-－—]/, '').replace(/[-－—]天猫.*$/, ''));
   }
   $('shop').value = GM_getValue(shopKey, '') || inferShop();
+  function inferCategory() {
+    const name = new URL(location.href).searchParams.get('catName');
+    return name && !name.includes('\uFFFD') ? clean(name) : '全部宝贝';
+  }
+  $('category').value = inferCategory();
   function allRows() {
     return GM_listValues().filter(k => k.startsWith(prefix)).map(k => GM_getValue(k)).filter(r => r?.id && r?.url)
-      .map(r => ({ ...r, sku: GM_getValue(skuCacheKey(r.id), null)?.sku || '' }))
+      .map(r => ({ ...r, category: r.category || (r.shopUrl === shopUrl ? clean($('category').value) : '') || '全部宝贝', sku: GM_getValue(skuCacheKey(r.id), null)?.sku || '' }))
       .sort((a, b) => a.shop.localeCompare(b.shop, 'zh-CN') || a.time.localeCompare(b.time));
   }
   function refreshCount() {
@@ -308,7 +322,7 @@
       const key = prefix + location.hostname + '.' + item.id;
       const previous = GM_getValue(key, null);
       if (!previous) added++;
-      GM_setValue(key, { ...item, shop, shopUrl, source: location.href, time: previous?.time || new Date().toISOString() });
+      GM_setValue(key, { ...item, shop, category: clean($('category').value) || '全部宝贝', shopUrl, source: location.href, time: previous?.time || new Date().toISOString() });
     }
     refreshCount();
     status(`本次识别 ${result.items.length} 条，新增 ${added} 条。` + (result.missing ? `\n${result.missing} 张卡片缺少标题或可验证链接，未完整采集。` : '') + (!result.items.length ? '\n请确认已登录、商品已加载且处于商品列表。若仍为 0，请提供当前页面地址以适配。' : ''));
@@ -412,7 +426,9 @@
     if (!rows.length) { status('暂无数据，请先采集。'); return; }
     const url = URL.createObjectURL(new Blob([xlsx(rows)], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
     const a = document.createElement('a'); a.href = url;
-    a.download = exportName(rows);
+    const category = clean($('category').value) || '全部宝贝';
+    const namingRows = rows.every(r => r.shopUrl === shopUrl) ? rows.map(r => ({ ...r, category })) : rows;
+    a.download = exportName(namingRows);
     shadow.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000);
     status(`已生成 ${a.download}，请查看浏览器下载列表。\n货号取首个颜色分类并加 IN 前缀；标题结果、货号结果、数字列留空。`);
   });
@@ -428,6 +444,7 @@
   setInterval(() => {
     if (lastUrl !== location.href) {
       lastUrl = location.href; stopping = true; $('confirmed').checked = false;
+      $('category').value = inferCategory();
       status('页面已切换，请重新确认新品排序后继续。');
     }
   }, 800);
