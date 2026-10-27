@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { productUrl, fromProps, csv, csvCell, collect, limitNewItems, xlsx, exportName } = require('../tmall-new-products.user.js');
+const { productUrl, fromProps, csv, csvCell, collect, selectUnbatchedItems, selectBatchRows, xlsx, exportName } = require('../tmall-new-products.user.js');
 const { parseHTML } = require('linkedom');
 
 test('规范商品链接，剔除跟踪参数，拒绝非商品域名和无效ID', () => {
@@ -52,17 +52,22 @@ test('旧版商品链接仍可采集，隐藏卡片被排除', () => {
   assert.equal(result.items[0].title, '旧版儿童运动套装');
 });
 
-test('按设置限制每次新增数量，不再把页面已加载的 120 条全部写入', () => {
+test('按设置限制本次批次数量，不再把页面已加载的 120 条全部写入', () => {
   const items = Array.from({ length: 120 }, (_, i) => ({ id: String(i + 1) }));
-  const first = limitNewItems(items, () => false, 1);
-  assert.equal(first.items.length, 1);
-  assert.equal(first.newCount, 1);
-  assert.equal(first.reached, true);
+  assert.deepEqual(selectUnbatchedItems(items, [], 1).map(item => item.id), ['1']);
+  assert.deepEqual(selectUnbatchedItems(items, ['1', '2'], 5).map(item => item.id), ['3', '4', '5']);
+  assert.deepEqual(selectUnbatchedItems(items, ['1', '2'], 2), []);
+});
 
-  const stored = new Set(['1', '2']);
-  const next = limitNewItems(items, item => stored.has(item.id), 3);
-  assert.deepEqual(next.items.map(item => item.id), ['1', '2', '3', '4', '5']);
-  assert.equal(next.newCount, 3);
+test('查看、补采和导出只选择本次批次；旧数据无批次时回退当前店铺', () => {
+  const rows = [
+    { id: '1', shopUrl: 'https://a.tmall.com/' },
+    { id: '2', shopUrl: 'https://a.tmall.com/' },
+    { id: '3', shopUrl: 'https://b.tmall.com/' }
+  ];
+  assert.deepEqual(selectBatchRows(rows, { ids: ['2'], shopUrl: 'https://a.tmall.com/' }, 'https://a.tmall.com/'), [rows[1]]);
+  assert.deepEqual(selectBatchRows(rows, null, 'https://a.tmall.com/'), [rows[0], rows[1]]);
+  assert.deepEqual(selectBatchRows(rows, { ids: [], shopUrl: 'https://a.tmall.com/' }, 'https://a.tmall.com/'), []);
 });
 
 test('文件名包含店名、品类、北京时间，跨店累计及非法字符得到处理', () => {
