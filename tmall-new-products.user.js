@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DouDian 天猫新品采集表
 // @namespace    doudian.local
-// @version      1.5.0
+// @version      1.5.1
 // @homepageURL  https://github.com/anysky911/DouDian
 // @downloadURL  https://raw.githubusercontent.com/anysky911/DouDian/main/tmall-new-products.user.js
 // @updateURL    https://raw.githubusercontent.com/anysky911/DouDian/main/tmall-new-products.user.js
@@ -101,6 +101,18 @@
       items.set(link.id, { title, ...link, ...(image ? { image } : {}) });
     }
     return { items: [...items.values()], missing, cards: cards.size };
+  }
+  function limitNewItems(items, isStored, maxNew) {
+    const limit = Math.max(1, Math.floor(Number(maxNew) || 1));
+    const selected = [];
+    let newCount = 0;
+    for (const item of items) {
+      const stored = !!isStored(item);
+      if (!stored && newCount >= limit) break;
+      selected.push(item);
+      if (!stored) newCount++;
+    }
+    return { items: selected, newCount, reached: newCount >= limit };
   }
   function productUrl(raw) {
     try {
@@ -327,7 +339,7 @@
     return { images, failed: rows.filter(r => !images.has(r.id)).length };
   }
   if (typeof module === 'object' && module.exports) {
-    module.exports = { productUrl, fromProps, csv, csvCell, collect, xlsx, exportName, extractSku, firstColor, imageUrl, cardImage, detailImage, prepareImages, loadImage };
+    module.exports = { productUrl, fromProps, csv, csvCell, collect, limitNewItems, xlsx, exportName, extractSku, firstColor, imageUrl, cardImage, detailImage, prepareImages, loadImage };
     return;
   }
   if (['detail.tmall.com', 'detail.tmall.hk', 'item.taobao.com'].includes(location.hostname)) {
@@ -359,6 +371,7 @@
   if (document.getElementById('doudian-collector')) return;
   const prefix = 'doudian.product.v1.';
   const shopKey = `doudian.shop.${location.hostname}`;
+  const targetKey = `doudian.target.${location.hostname}`;
   const shopUrl = `${location.origin}/`;
   const host = document.createElement('div');
   host.id = 'doudian-collector';
@@ -371,13 +384,13 @@
       input[type=text]{width:100%;padding:7px;border:1px solid #ccc;border-radius:5px;margin:4px 0 8px} input[type=number]{width:65px} .row{display:flex;gap:7px;flex-wrap:wrap;margin:9px 0} .muted{font-size:12px;color:#667085}.status{white-space:pre-wrap;margin:9px 0;max-height:130px;overflow:auto}.hide{display:none!important} .min{float:right;padding:0 7px} a{color:#155cc5} .shops{display:flex;gap:12px;font-size:12px}
       .overlay{position:fixed;inset:5vh 4vw;z-index:2147483647;background:#fff;border:1px solid #ccc;box-shadow:0 5px 40px #0005;border-radius:10px;padding:18px;display:flex;flex-direction:column;font:14px/1.5 system-ui,sans-serif;color:#17212f}.scroll{overflow:auto;flex:1}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:8px;text-align:left}th{position:sticky;top:0;background:#f0f2f5}td:nth-child(2){min-width:240px}td:nth-child(3){min-width:112px}td:nth-child(4){min-width:120px}td:nth-child(8){word-break:break-all}td{white-space:normal;overflow-wrap:anywhere;vertical-align:middle} .head{display:flex;justify-content:space-between;margin-bottom:12px}
     </style>
-    <section class="panel"><button class="min" id="min">收起</button><h3>DouDian · 新品表 v1.5.0</h3>
+    <section class="panel"><button class="min" id="min">收起</button><h3>DouDian · 新品表 v1.5.1</h3>
     <div id="body"><label>店铺名称<input type="text" id="shop" placeholder="请确认或输入店铺名称"></label>
     <label>品类（用于文件名）<input type="text" id="category" placeholder="例如：运动套装、外套、全部宝贝"></label>
     <label><input id="confirmed" type="checkbox"> 我已进入本店商品列表并选择“新品”</label>
     <div class="muted">仅采集当前列表；新品排序不等于近期上架。可手动翻页后继续采集。</div>
     <div class="row"><button id="scan" class="primary">采集当前列表</button><button id="run">滚动采集</button><button id="stop" disabled>停止</button></div>
-    <label class="muted">滚动最多 <input id="rounds" type="number" min="1" max="100" value="30"> 次（每次约 1.5 秒）</label>
+    <label class="muted">本次最多新增 <input id="target" type="number" min="1" max="1000" value="120"> 条（达到数量即停止）</label>
     <div id="status" class="status">等待采集。请先登录天猫并选择“新品”。</div><div id="count" class="muted"></div>
     <div class="row"><button id="preview">查看表格</button><button id="sku">补采货号和图片</button><button id="export">导出 Excel</button><button id="clear">清空全部</button></div>
     <div class="muted">导出前补采货号和缺失主图，图片实际嵌入 Excel。无法读取时留空并提示，其他商品正常导出。</div>
@@ -396,6 +409,7 @@
     return clean(document.title.replace(/^(首页|所有宝贝|所有商品|本店搜索|店内搜索)[-－—]/, '').replace(/[-－—]天猫.*$/, ''));
   }
   $('shop').value = GM_getValue(shopKey, '') || inferShop();
+  $('target').value = String(GM_getValue(targetKey, 120));
   function inferCategory() {
     const name = new URL(location.href).searchParams.get('catName');
     return name && !name.includes('\uFFFD') ? clean(name) : '全部宝贝';
@@ -439,21 +453,33 @@
     if (!$('confirmed').checked) throw new Error('请先手动选择店铺“新品”排序，再勾选确认框。');
     if (!clean($('shop').value)) throw new Error('请填写店铺名称。');
   }
-  function scan() {
+  function readTarget() {
+    const target = Math.max(1, Math.min(1000, Math.floor(Number($('target').value) || 120)));
+    $('target').value = String(target);
+    GM_setValue(targetKey, target);
+    return target;
+  }
+  $('target').onchange = readTarget;
+  function scan(maxNew = readTarget()) {
     check();
     const shop = clean($('shop').value);
     GM_setValue(shopKey, shop);
     const result = extract();
-    let added = 0;
-    for (const item of result.items) {
+    const previous = new Map(result.items.map(item => {
       const key = prefix + location.hostname + '.' + item.id;
-      const previous = GM_getValue(key, null);
-      if (!previous) added++;
-      GM_setValue(key, { ...item, image: item.image || previous?.image || '', shop, category: clean($('category').value) || '全部宝贝', shopUrl, source: location.href, time: previous?.time || new Date().toISOString() });
+      return [item.id, GM_getValue(key, null)];
+    }));
+    const limited = limitNewItems(result.items, item => previous.has(item.id) && previous.get(item.id), maxNew);
+    let added = 0;
+    for (const item of limited.items) {
+      const key = prefix + location.hostname + '.' + item.id;
+      const old = previous.get(item.id);
+      if (!old) added++;
+      GM_setValue(key, { ...item, image: item.image || old?.image || '', shop, category: clean($('category').value) || '全部宝贝', shopUrl, source: location.href, time: old?.time || new Date().toISOString() });
     }
     refreshCount();
-    status(`本次识别 ${result.items.length} 条，新增 ${added} 条。` + (result.missing ? `\n${result.missing} 张卡片缺少标题或可验证链接，未完整采集。` : '') + (!result.items.length ? '\n请确认已登录、商品已加载且处于商品列表。若仍为 0，请提供当前页面地址以适配。' : ''));
-    return { ...result, added };
+    status(`本次识别 ${result.items.length} 条，按设置最多新增 ${maxNew} 条，实际新增 ${added} 条。` + (result.missing ? `\n${result.missing} 张卡片缺少标题或可验证链接，未完整采集。` : '') + (!result.items.length ? '\n请确认已登录、商品已加载且处于商品列表。若仍为 0，请提供当前页面地址以适配。' : ''));
+    return { ...result, added, processed: limited.items.length, reached: limited.reached };
   }
   function safe(action) { return () => { try { action(); } catch (e) { status(`操作未完成：${e.message}`); } }; }
   let running = false;
@@ -463,23 +489,23 @@
   $('run').onclick = async () => {
     if (running) return;
     try { check(); } catch (e) { status(e.message); return; }
-    const limit = Math.max(1, Math.min(100, Number($('rounds').value) || 30));
+    const target = readTarget();
     running = true; stopping = false;
     for (const id of ['scan', 'run', 'clear', 'sku', 'export']) $(id).disabled = true;
     $('stop').disabled = false;
-    let stale = 0, total = 0, reason = '已达到滚动次数上限；可继续采集或手动翻页。';
+    let stale = 0, total = 0, reason = '已达到安全滚动上限；可继续采集或手动翻页。';
     try {
-      for (let i = 0; i < limit && !stopping; i++) {
-        const result = scan(); total += result.added;
+      for (let i = 0; i < 100 && !stopping && total < target; i++) {
+        const result = scan(target - total); total += result.added;
+        if (total >= target) { reason = `已按设置新增 ${target} 条。`; break; }
         if (!result.items.length) { reason = '未识别到商品，请检查登录状态和当前列表。'; break; }
         const bottom = window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 100;
         stale = bottom && result.added === 0 ? stale + 1 : 0;
         if (stale >= 4) { reason = '已到页面底部且连续未新增；有下一页时请手动翻页继续。'; break; }
-        status(`滚动采集 ${i + 1}/${limit}，累计新增 ${total} 条。\n当前缺少链接或标题的卡片：${result.missing}。`);
+        status(`滚动采集：累计新增 ${total}/${target} 条。\n当前缺少链接或标题的卡片：${result.missing}。`);
         window.scrollBy({ top: Math.max(400, window.innerHeight * .8), behavior: 'instant' });
         await new Promise(resolve => setTimeout(resolve, 1500));
       }
-      if (!stopping) total += scan().added;
       status(`本轮新增 ${total} 条。${stopping ? '已停止。' : reason}\n未识别的卡片不会导出；“采集当前列表”可查看缺失数。`);
     } catch (e) { status(`采集停止：${e.message}`); }
     finally {
@@ -591,3 +617,4 @@
   }, 800);
   refreshCount();
 })();
+
