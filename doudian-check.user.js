@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         抖店检查V1.3.0
+// @name         抖店检查V1.3.1
 // @namespace    anysky911.doudian.check
-// @version      1.3.0
-// @description  支持商品标题、货号、商品标题+货号三种校验模式，分别搜索并写入标题结果、货号结果列后保存。
+// @version      1.3.1
+// @description  修复商品标题+货号模式，按 Excel 行逐项校验并核对每次搜索结果后分别写入结果列。
 // @homepageURL  https://github.com/anysky911/DouDian
 // @downloadURL  https://raw.githubusercontent.com/anysky911/DouDian/main/doudian-check.user.js
 // @updateURL    https://raw.githubusercontent.com/anysky911/DouDian/main/doudian-check.user.js
@@ -47,7 +47,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
  */
 (() => {
   'use strict';
-  const VERSION = '1.3.0', CHANNEL = 'doudian-check-1';
+  const VERSION = '1.3.1', CHANNEL = 'doudian-check-1';
   const MODES = {
     title: { label: '商品标题', resultHeader: '标题结果', searchLabel: '商品名称' },
     sku: { label: '货号', resultHeader: '货号结果', searchLabel: '款式编码' }
@@ -62,8 +62,9 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   const visible = e => !!e && e.isConnected && e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
   const query = s => document.querySelector(s);
   const all = s => [...document.querySelectorAll(s)];
-  const isGoods = location.hostname === 'goods.scm121.com';
-  const embedded = window.top !== window;
+  const inBrowser = typeof window !== 'undefined' && typeof location !== 'undefined' && typeof document !== 'undefined';
+  const isGoods = inBrowser && location.hostname === 'goods.scm121.com';
+  const embedded = inBrowser && window.top !== window;
   const xml = text => {
     const d = new DOMParser().parseFromString(text, 'application/xml');
     if (d.getElementsByTagName('parsererror').length) throw new Error('Excel XML 无法解析');
@@ -111,7 +112,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
     } else if (shield) shield.style.display = 'none';
     locked = value;
   }
-  document.addEventListener('keydown', e => { if (locked && e.isTrusted && !e.composedPath().some(n => n.id === 'dd-check-panel')) { e.preventDefault(); e.stopImmediatePropagation(); } }, true);
+  if (inBrowser) document.addEventListener('keydown', e => { if (locked && e.isTrusted && !e.composedPath().some(n => n.id === 'dd-check-panel')) { e.preventDefault(); e.stopImmediatePropagation(); } }, true);
   function resultState() {
     const table = all('.art-table').find(visible);
     if (!table) return null;
@@ -127,8 +128,9 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   }
   function loading() { return all('.art-loading-indicator-wrapper,.ant-spin-spinning').some(visible); }
   async function checkTitle(payload) {
-    const { mode, keyword } = typeof payload === 'string' ? { mode: 'title', keyword: payload } : payload || {};
-    if (!Object.hasOwn(MODES, mode) || typeof keyword !== 'string' || !clean(keyword)) throw new Error('校验模式无效或搜索内容为空');
+    const request = typeof payload === 'string' ? { mode: 'title', keyword: payload } : payload || {};
+    const mode = request.mode, keyword = clean(request.keyword);
+    if (!Object.hasOwn(MODES, mode) || !keyword) throw new Error('校验模式无效或搜索内容为空');
     if (!locked || busyQuery) throw new Error('检测状态异常，请暂停后重新开始');
     if (fingerprint() !== baseline) throw new Error('筛选条件发生变化，请重新开始');
     if (loading()) throw new Error('页面仍在加载，请稍后重试');
@@ -173,7 +175,7 @@ https://github.com/nodeca/pako/blob/main/LICENSE
         const result = resultState();
         if (!sawLoading || !result) { stableSince = 0; continue; }
         if (!stableSince || last !== result.text) { stableSince = Date.now(); last = result.text; }
-        if (Date.now() - stableSince >= 800) return result;
+        if (Date.now() - stableSince >= 800) return { ...result, mode, keyword };
       }
       throw new Error('30秒超时或未确认本次搜索完成，未判定为无商品');
     } finally { observer?.disconnect(); busyQuery = false; }
@@ -281,8 +283,15 @@ https://github.com/nodeca/pako/blob/main/LICENSE
   }
   function planTasks(sheet, mode, skip = true) {
     const modes = checkModes(mode);
-    const pending = modes.map(m => new Set(tasksFor(sheet, m, skip)));
-    return sheet.items.flatMap(item => modes.flatMap((m, i) => pending[i].has(item) ? [{ item, mode: m }] : []));
+    for (const m of modes) tasksFor(sheet, m, skip);
+    const tasks = [];
+    for (const item of sheet.items) for (const [stepIndex, m] of modes.entries()) {
+      const keyword = clean(item[m]), result = item.results[m] || item.old[m];
+      if (keyword && (!skip || !result || result.startsWith('检测失败'))) {
+        tasks.push({ item, mode: m, keyword, step: stepIndex + 1, steps: modes.length });
+      }
+    }
+    return tasks;
   }
   function patchSheet(sheet) {
     // Patch only result cells in the original XML, leaving all other cells/formatting untouched.
@@ -453,12 +462,16 @@ https://github.com/nodeca/pako/blob/main/LICENSE
       await rpc('lock'); lockedHere = true;
       el('progress').max = tasks.length; el('progress').value = 0;
       for (let i = 0; i < tasks.length && !stop; i++) {
-        const { item, mode: taskMode } = tasks[i], taskConfig = MODES[taskMode];
-        status(`${ctx}\n${taskConfig.label}校验 → ${taskConfig.resultHeader}\n${i + 1}/${tasks.length}次，Excel 第${item.row}行\n${item[taskMode]}\n检测中…`);
-        try { item.results[taskMode] = (await rpc('check', { mode: taskMode, keyword: item[taskMode] })).text; }
+        const { item, mode: taskMode, keyword, step, steps } = tasks[i], taskConfig = MODES[taskMode];
+        status(`${ctx}\n逐行校验：Excel 第${item.row}行，第${step}/${steps}项（${taskConfig.label}）\n总进度 ${i + 1}/${tasks.length}次\n${keyword}\n检测中…`);
+        try {
+          const reply = await rpc('check', { mode: taskMode, keyword });
+          if (reply?.mode !== taskMode || reply?.keyword !== keyword || typeof reply?.text !== 'string') throw new Error('本次搜索回执不匹配，已停止以避免结果串行');
+          item.results[taskMode] = reply.text;
+        }
         catch (err) { item.results[taskMode] = `检测失败：${err.message}`; failed = true; stop = true; }
         dirty = true; el('progress').value = i + 1;
-        status(`${i + 1}/${tasks.length}次，${taskConfig.resultHeader}：${item.results[taskMode]}\n${item[taskMode]}`);
+        status(`${i + 1}/${tasks.length}次，Excel 第${item.row}行 ${taskConfig.resultHeader}：${item.results[taskMode]}\n${keyword}`);
         if (!stop && i + 1 < tasks.length) {
           const since = Date.now();
           while (!stop && Date.now() - since < interval() * 1000) await sleep(100);
