@@ -36,7 +36,7 @@ test('详情页等待异步颜色选项稳定后按商品ID写入货号和任务
   const url='https://detail.tmall.com/item.htm?id=834317211932#doudian-sku=test-task';
   const context={document,location:new URL(url),URL,URLSearchParams,Date:{now:()=>now},setInterval:fn=>(tick=fn,1),clearInterval:()=>stopped=true,GM_setValue:(k,v)=>saved.set(k,v)};
   vm.runInNewContext(fs.readFileSync(require.resolve('../tmall-new-products.user.js'),'utf8'),context);
-  tick(); assert.equal(saved.size,0); now+=11000; tick();
+  tick(); assert.equal(saved.size,0); now+=26000; tick();
   const result=saved.get('doudian.sku.first-color.v1.834317211932');
   assert.equal(result.sku,'IN19553+16163'); assert.equal(result.task,'test-task'); assert.equal(result.ok,true); assert.equal(stopped,true);
 });
@@ -53,6 +53,7 @@ test('补采按钮串行打开详情页、接收回填、关闭临时标签并�
   const saved=new Map([['doudian.product.v1.amencl.tmall.com.834317211932',{shop:'测试店',title:'运动套装',image:'https://img.alicdn.com/test.jpg',id:'834317211932',url:'https://detail.tmall.com/item.htm?id=834317211932',shopUrl:'https://amencl.tmall.com/',time:'2026-10-20'}]]);
   const opened=[];let closed=0;
   const context={document,location:new URL('https://amencl.tmall.com/'),URL,URLSearchParams,Intl,TextEncoder,Date,window:{addEventListener(){}},setInterval(){},setTimeout:fn=>{fn();},GM_getValue:(k,d)=>saved.has(k)?saved.get(k):d,GM_listValues:()=>[...saved.keys()],GM_setValue:(k,v)=>saved.set(k,v),GM_openInTab:(url,options)=>{opened.push({url,options});saved.set('doudian.sku.first-color.v1.834317211932',{sku:'IN19553+16163',ok:true,imageDone:true,task:new URLSearchParams(new URL(url).hash.slice(1)).get('doudian-sku')});return {close(){closed++;}};}};
+  Object.assign(context, require('./image-browser.cjs')(document));
   vm.runInNewContext(fs.readFileSync(require.resolve('../tmall-new-products.user.js'),'utf8'),context);
   const ui=document.getElementById('doudian-collector').shadowRoot;
   await ui.getElementById('sku').onclick();

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DouDian 天猫新品采集表
 // @namespace    doudian.local
-// @version      1.5.2
+// @version      1.5.3
 // @homepageURL  https://github.com/anysky911/DouDian
 // @downloadURL  https://raw.githubusercontent.com/anysky911/DouDian/main/tmall-new-products.user.js
 // @updateURL    https://raw.githubusercontent.com/anysky911/DouDian/main/tmall-new-products.user.js
@@ -26,6 +26,7 @@
   const validId = value => /^\d{6,20}$/.test(String(value ?? ''));
   const TITLE_SELECTOR = '[class*="title--"], .detail a, .item-name, .title, a[title]';
   const CARD_SELECTOR = '[data-item-id], [data-itemid], .shop-item-card, [class*="cardContainer--"], .J_TItems .item, .shop-hesper-bd .item, .item5line1 .item, .item4line1 .item';
+  const validImageSize = (width, height) => width >= 100 && height >= 100;
   function imageUrl(raw) {
     try {
       if (typeof raw !== 'string' || !/^(?:https?:)?\/\//i.test(raw)) return '';
@@ -38,7 +39,11 @@
     if (!img) return '';
     for (const raw of [img.getAttribute('data-src'), img.getAttribute('data-lazy-src'), img.getAttribute('data-ks-lazyload'), img.currentSrc, img.getAttribute('src')]) {
       const url = raw && imageUrl(raw);
-      if (url) return url;
+      if (url) {
+        const loadedUrl = imageUrl(img.currentSrc || img.getAttribute('src'));
+        if (url === loadedUrl && img.complete && !validImageSize(img.naturalWidth, img.naturalHeight)) continue;
+        return url;
+      }
     }
     return '';
   }
@@ -58,7 +63,11 @@
     candidates.sort((a, b) => b.area - a.area);
     return candidates.length ? imageSource(candidates[0].img) : '';
   }
-  function detailImage(doc) { return imageSource(doc.querySelector('#mainPicImageEl')); }
+  function detailImage(doc) {
+    const img = doc.querySelector('#mainPicImageEl');
+    if (!img?.complete || !validImageSize(img.naturalWidth, img.naturalHeight)) return '';
+    return imageUrl(img.currentSrc || img.getAttribute('src'));
+  }
   const imageCacheKey = id => `doudian.image.main.v1.${id}`;
   function domLink(card) {
     // 商品ID属性优先，不能把 SKU 缩略图或广告链接当作当前商品。
@@ -266,7 +275,7 @@
     const anchors = [], relationships = [];
     rows.forEach((row, index) => {
       const image = images.get(row.id);
-      if (!image?.bytes?.length || !(image.width > 0 && image.height > 0)) return;
+      if (!image?.bytes?.length || !validImageSize(image.width, image.height)) return;
       const n = anchors.length + 1, scale = Math.min(100 / image.width, 100 / image.height);
       const w = image.width * scale, h = image.height * scale;
       const x = (113 - w) / 2, y = (heights[index + 1] * 4 / 3 - h) / 2;
@@ -316,7 +325,7 @@
         image.onerror = () => { clearTimeout(timer); reject(new Error('图片无法解码')); };
         image.src = objectUrl;
       });
-      if (!image.naturalWidth || !image.naturalHeight) throw new Error('图片尺寸无效');
+      if (!validImageSize(image.naturalWidth, image.naturalHeight)) throw new Error('图片尺寸过小，疑似占位图');
       const scale = Math.min(1, 240 / image.naturalWidth, 240 / image.naturalHeight);
       const canvas = document.createElement('canvas');
       canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
@@ -329,7 +338,8 @@
       return { bytes: new Uint8Array(await jpeg.arrayBuffer()), width: canvas.width, height: canvas.height };
     } finally { URL.revokeObjectURL(objectUrl); }
   }
-  async function prepareImages(rows, loader = loadImage, progress = () => {}, shouldStop = () => false) {
+  async function prepareImages(rows, loader = loadImage, progress = () => {}, shouldStop = () => false,
+    seed = new Map(), wait = ms => new Promise(resolve => setTimeout(resolve, ms))) {
     const images = new Map(), attempted = new Set();
     for (let i = 0; i < rows.length; i++) {
       if (shouldStop()) throw new Error('已停止导出');
@@ -337,8 +347,26 @@
       progress(i + 1, rows.length);
       if (attempted.has(row.id)) continue;
       attempted.add(row.id);
-      if (!imageUrl(row.image)) continue;
-      try { images.set(row.id, await loader(row.image)); } catch { /* 单张失败留空，继续其他商品。 */ }
+      const candidates = [...new Set([row.image, row.imageFallback].map(imageUrl).filter(Boolean))];
+      const cached = seed.get(row.id);
+      if (cached?.bytes?.length && cached.sourceUrl === candidates[0] && validImageSize(cached.width, cached.height)) {
+        images.set(row.id, cached); continue;
+      }
+      for (const url of candidates) {
+        for (let attempt = 0; attempt < 3; attempt++) {
+          if (shouldStop()) throw new Error('已停止导出');
+          try {
+            const image = await loader(url);
+            if (!image?.bytes?.length || !validImageSize(image.width, image.height)) throw new Error('图片无效或尺寸过小');
+            images.set(row.id, { ...image, sourceUrl: url });
+            break;
+          } catch {
+            if (shouldStop()) throw new Error('已停止导出');
+            if (attempt < 2) await wait(500 * (attempt + 1));
+          }
+        }
+        if (images.has(row.id)) break;
+      }
     }
     if (shouldStop()) throw new Error('已停止导出');
     return { images, failed: rows.filter(r => !images.has(r.id)).length };
@@ -359,8 +387,8 @@
       if (mainImage) GM_setValue(imageCacheKey(item.id), { image: mainImage, time: Date.now() });
       if (color !== last) { last = color; stableSince = Date.now(); }
       if (color && Date.now() - stableSince >= 1200) {
-        GM_setValue(skuCacheKey(item.id), { color, sku: extractSku(color), time: Date.now(), task, ok: true, imageDone: !!mainImage || Date.now() - started > 10000 });
-        finished = !!mainImage || Date.now() - started > 10000;
+        GM_setValue(skuCacheKey(item.id), { color, sku: extractSku(color), time: Date.now(), task, ok: true, imageDone: !!mainImage || Date.now() - started > 25000 });
+        finished = !!mainImage || Date.now() - started > 25000;
       } else if (Date.now() - started > 25000) {
         if (task) {
           const previous = GM_getValue(skuCacheKey(item.id), null);
@@ -390,7 +418,7 @@
       input[type=text]{width:100%;padding:7px;border:1px solid #ccc;border-radius:5px;margin:4px 0 8px} input[type=number]{width:65px} .row{display:flex;gap:7px;flex-wrap:wrap;margin:9px 0} .muted{font-size:12px;color:#667085}.status{white-space:pre-wrap;margin:9px 0;max-height:130px;overflow:auto}.hide{display:none!important} .min{float:right;padding:0 7px} a{color:#155cc5} .shops{display:flex;gap:12px;font-size:12px}
       .overlay{position:fixed;inset:5vh 4vw;z-index:2147483647;background:#fff;border:1px solid #ccc;box-shadow:0 5px 40px #0005;border-radius:10px;padding:18px;display:flex;flex-direction:column;font:14px/1.5 system-ui,sans-serif;color:#17212f}.scroll{overflow:auto;flex:1}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:8px;text-align:left}th{position:sticky;top:0;background:#f0f2f5}td:nth-child(2){min-width:240px}td:nth-child(3){min-width:112px}td:nth-child(4){min-width:120px}td:nth-child(8){word-break:break-all}td{white-space:normal;overflow-wrap:anywhere;vertical-align:middle} .head{display:flex;justify-content:space-between;margin-bottom:12px}
     </style>
-    <section class="panel"><button class="min" id="min">收起</button><h3>DouDian · 新品表 v1.5.2</h3>
+    <section class="panel"><button class="min" id="min">收起</button><h3>DouDian · 新品表 v1.5.3</h3>
     <div id="body"><label>店铺名称<input type="text" id="shop" placeholder="请确认或输入店铺名称"></label>
     <label>品类（用于文件名）<input type="text" id="category" placeholder="例如：运动套装、外套、全部宝贝"></label>
     <label><input id="confirmed" type="checkbox"> 我已进入本店商品列表并选择“新品”</label>
@@ -423,7 +451,7 @@
   $('category').value = inferCategory();
   function allRows() {
     return GM_listValues().filter(k => k.startsWith(prefix)).map(k => GM_getValue(k)).filter(r => r?.id && r?.url)
-      .map(r => ({ ...r, image: imageUrl(r.image) || imageUrl(GM_getValue(imageCacheKey(r.id), null)?.image), category: r.category || (r.shopUrl === shopUrl ? clean($('category').value) : '') || '全部宝贝', sku: GM_getValue(skuCacheKey(r.id), null)?.sku || '' }))
+      .map(r => ({ ...r, image: imageUrl(GM_getValue(imageCacheKey(r.id), null)?.image) || imageUrl(r.image), imageFallback: imageUrl(r.image), category: r.category || (r.shopUrl === shopUrl ? clean($('category').value) : '') || '全部宝贝', sku: GM_getValue(skuCacheKey(r.id), null)?.sku || '' }))
       .sort((a, b) => a.shop.localeCompare(b.shop, 'zh-CN') || a.time.localeCompare(b.time));
   }
   function batchRows() {
@@ -537,10 +565,10 @@
       $('stop').disabled = true;
     }
   };
-  async function fillSkus(retryImages = false) {
-    const pending = [...new Map(batchRows().filter(r => {
+  async function fillSkus(rows, invalidImages) {
+    const pending = [...new Map(rows.filter(r => {
       const cached = GM_getValue(skuCacheKey(r.id), null);
-      return !cached?.ok || (!r.image && (retryImages || !cached?.imageDone));
+      return !cached?.ok || invalidImages.has(r.id);
     }).map(r => [r.id, r])).values()];
     let failed = 0;
     if (!pending.length) return { failed };
@@ -568,14 +596,26 @@
     }
     return { failed };
   }
-  async function withSkus(action, retryImages = false) {
+  async function withSkus(action) {
     if (running) return;
     running = true; stopping = false;
     for (const id of ['scan', 'run', 'clear', 'sku', 'export']) $(id).disabled = true;
     $('stop').disabled = false;
     try {
-      const result = await fillSkus(retryImages);
-      if (result) await action(result);
+      // 锁定本次操作的商品，避免其他标签切换批次导致补采和导出范围不同。
+      const snapshot = batchRows();
+      if (!snapshot.length) { status('本批暂无数据，请先采集。'); return; }
+      const progress = (done, total) => status(`校验商品图片 ${done}/${total}，失败自动重试（每个地址最多 3 次）…`);
+      const initial = await prepareImages(snapshot, loadImage, progress, () => stopping);
+      const invalidImages = new Set(snapshot.filter(r => !initial.images.has(r.id)).map(r => r.id));
+      const result = await fillSkus(snapshot, invalidImages);
+      if (result) {
+        const latest = new Map(allRows().map(r => [r.shopUrl + r.id, r]));
+        const rows = snapshot.map(r => latest.get(r.shopUrl + r.id) || r);
+        const pictures = await prepareImages(rows, loadImage, progress, () => stopping, initial.images);
+        if (stopping) throw new Error('已停止');
+        await action({ ...result, rows, pictures });
+      }
       else status('已停止补采，已完成的货号保留。');
     } catch (e) { status(`操作未完成：${e.message}`); }
     finally {
@@ -584,7 +624,7 @@
       $('stop').disabled = true;
     }
   }
-  $('sku').onclick = () => withSkus(result => status(`本批补采完成，${result.failed} 个商品详情未能读取，${batchRows().filter(r => !r.image).length} 行缺少图片。可查看表格或导出。`), true);
+  $('sku').onclick = () => withSkus(result => status(`本批补采完成，${result.failed} 个商品详情未能读取，${result.pictures.failed} 行图片校验失败或缺图。可查看表格或导出。`));
   $('preview').onclick = safe(() => {
     const rows = batchRows(); $('rows').replaceChildren();
     $('tableTitle').textContent = `本批采集结果 · ${rows.length} 条`;
@@ -611,9 +651,9 @@
   });
   $('close').onclick = () => $('overlay').classList.add('hide');
   $('export').onclick = () => withSkus(async detailResult => {
-    const rows = batchRows();
+    const rows = detailResult.rows;
     if (!rows.length) { status('本批暂无数据，请先采集。'); return; }
-    const result = await prepareImages(rows, loadImage, (done, total) => status(`准备图片 ${done}/${total}，下载失败的图片将留空…`), () => stopping);
+    const result = detailResult.pictures;
     const url = URL.createObjectURL(new Blob([xlsx(rows, result.images)], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
     const a = document.createElement('a'); a.href = url;
     const category = clean($('category').value) || '全部宝贝';
@@ -641,4 +681,3 @@
   }, 800);
   refreshCount();
 })();
-

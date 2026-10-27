@@ -28,6 +28,12 @@ test('商品卡片主图与ID绑定，排除SKU缩略图、图标和相邻商品
 
 test('缺图旧数据可读详情主图；只接受有效图片CDN地址', () => {
   const { document } = parseHTML(`<img id="mainPicImageEl" src="//img.alicdn.com/main.jpg">`);
+  const img = document.querySelector('img');
+  Object.assign(img, { complete: true, naturalWidth: 2, naturalHeight: 2 });
+  assert.equal(detailImage(document), '');
+  Object.assign(img, { naturalWidth: 800, naturalHeight: 800, complete: false });
+  assert.equal(detailImage(document), '');
+  img.complete = true;
   assert.equal(detailImage(document), main);
   for (const raw of ['', undefined, 'undefined', '/photo.jpg', 'javascript:alert(1)', 'https://img.alicdn.com.evil.example/a.jpg']) assert.equal(imageUrl(raw), '');
 });
@@ -39,8 +45,8 @@ test('单张下载失败不阻断导出，按商品ID去重，停止不再下载
     calls.push(url);
     if (url.includes('bad')) throw Error('404');
     return { bytes: Uint8Array.of(255, 216, 255, 217), width: 240, height: 120 };
-  });
-  assert.equal(calls.length, 2);
+  }, () => {}, () => false, new Map(), async () => {});
+  assert.equal(calls.length, 4);
   assert.equal(result.failed, 2);
   assert.equal(result.images.size, 1);
   let stop = false, count = 0;
@@ -60,6 +66,60 @@ function unzip(bytes) {
   }
   return files;
 }
+
+test('2×2 占位图重试后拒绝；临时下载失败可恢复；失败详情图可回退列表图', async () => {
+  const calls = [];
+  const result = await prepareImages([
+    { id: 'tiny', image: main },
+    { id: 'retry', image: 'https://img.alicdn.com/retry.jpg' },
+    { id: 'fallback', image: main, imageFallback: 'https://img.alicdn.com/good.jpg' }
+  ], async url => {
+    calls.push(url);
+    if (url.includes('retry') && calls.filter(x => x === url).length < 3) throw Error('timeout');
+    return { bytes: Uint8Array.of(255, 216), width: url === main ? 2 : 240, height: url === main ? 2 : 240 };
+  }, () => {}, () => false, new Map(), async () => {});
+  assert.equal(result.failed, 1);
+  assert.equal(result.images.has('tiny'), false);
+  assert.equal(result.images.has('retry'), true);
+  assert.equal(result.images.get('fallback').sourceUrl, 'https://img.alicdn.com/good.jpg');
+  assert.equal(calls.filter(x => x.includes('retry')).length, 3);
+  const files = unzip(xlsx([{ id: 'tiny' }], new Map([['tiny', { bytes: Uint8Array.of(1), width: 2, height: 2 }]])));
+  assert.equal(files['xl/media/image1.jpg'], undefined);
+});
+
+test('历史白图即使已标记补采完成，仍触发详情替换并导出有效图片', async () => {
+  const vm = require('node:vm'), fs = require('node:fs');
+  const { document } = parseHTML('<html><head><title>测试店</title></head><body></body></html>');
+  const id = '834317211932', good = 'https://img.alicdn.com/detail-good.jpg';
+  const saved = new Map([
+    [`doudian.product.v1.amencl.tmall.com.${id}`, { id, shop:'测试店', title:'商品', image:main, url:`https://detail.tmall.com/item.htm?id=${id}`, shopUrl:'https://amencl.tmall.com/', time:'2026-10-27' }],
+    [`doudian.sku.first-color.v1.${id}`, { ok:true, imageDone:true, sku:'IN123' }]
+  ]);
+  let opens = 0, closes = 0, downloads = 0;
+  const browser = require('./image-browser.cjs')(document, url => url === main ? [2, 2] : [240, 240]);
+  const create = document.createElement.bind(document);
+  document.createElement = tag => { const el = create(tag); if (tag === 'a') el.click = () => downloads++; return el; };
+  vm.runInNewContext(fs.readFileSync(require.resolve('../tmall-new-products.user.js'), 'utf8'), {
+    ...browser, document, location:new URL('https://amencl.tmall.com/'), URLSearchParams, Intl, TextEncoder, Date,
+    window:{ addEventListener() {} }, setInterval() {},
+    GM_getValue:(key, fallback) => saved.has(key) ? saved.get(key) : fallback,
+    GM_listValues:() => [...saved.keys()], GM_setValue:(key, value) => saved.set(key, value),
+    GM_openInTab(url) {
+      opens++;
+      saved.set(`doudian.image.main.v1.${id}`, { image:good });
+      saved.set(`doudian.sku.first-color.v1.${id}`, { ok:true, imageDone:true, sku:'IN123', task:new URLSearchParams(new URL(url).hash.slice(1)).get('doudian-sku') });
+      return { close() { closes++; } };
+    }
+  });
+  const ui = document.getElementById('doudian-collector').shadowRoot;
+  await ui.getElementById('export').onclick();
+  assert.equal(opens, 1); assert.equal(closes, 1); assert.equal(downloads, 1);
+  assert.match(ui.getElementById('status').textContent, /图片成功 1 行，失败或缺图 0 行/);
+  ui.getElementById('preview').onclick();
+  assert.equal(ui.getElementById('rows').querySelector('img').getAttribute('src'), good);
+  await ui.getElementById('sku').onclick();
+  assert.equal(opens, 1);
+});
 
 test('XLSX图片字节不损坏、关系完整、锚定对应行C列，比例和后续列正确', () => {
   const jpeg = Uint8Array.of(255, 216, 0, 128, 255, 217);
