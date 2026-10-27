@@ -1,6 +1,6 @@
 {
   "name": "doudian-tmall-collector",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "private": true,
   "scripts": {
     "test": "node --check tmall-new-products.user.js && node --test tests/*.test.cjs"
