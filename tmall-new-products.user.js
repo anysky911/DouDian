@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         DouDian 天猫新品采集表
 // @namespace    doudian.local
-// @version      1.5.1
+// @version      1.5.2
 // @homepageURL  https://github.com/anysky911/DouDian
 // @downloadURL  https://raw.githubusercontent.com/anysky911/DouDian/main/tmall-new-products.user.js
 // @updateURL    https://raw.githubusercontent.com/anysky911/DouDian/main/tmall-new-products.user.js
@@ -102,17 +102,22 @@
     }
     return { items: [...items.values()], missing, cards: cards.size };
   }
-  function limitNewItems(items, isStored, maxNew) {
-    const limit = Math.max(1, Math.floor(Number(maxNew) || 1));
-    const selected = [];
-    let newCount = 0;
+  function selectUnbatchedItems(items, batchIds, maxItems) {
+    const selected = [], seen = new Set((batchIds || []).map(String));
+    const remaining = Math.max(0, Math.floor(Number(maxItems) || 0) - seen.size);
+    if (!remaining) return selected;
     for (const item of items) {
-      const stored = !!isStored(item);
-      if (!stored && newCount >= limit) break;
+      if (seen.has(String(item.id))) continue;
       selected.push(item);
-      if (!stored) newCount++;
+      seen.add(String(item.id));
+      if (selected.length >= remaining) break;
     }
-    return { items: selected, newCount, reached: newCount >= limit };
+    return selected;
+  }
+  function selectBatchRows(rows, batch, currentShopUrl) {
+    if (!batch || !Array.isArray(batch.ids)) return rows.filter(row => row.shopUrl === currentShopUrl);
+    const ids = new Set(batch.ids.map(String));
+    return rows.filter(row => row.shopUrl === batch.shopUrl && ids.has(String(row.id)));
   }
   function productUrl(raw) {
     try {
@@ -339,7 +344,7 @@
     return { images, failed: rows.filter(r => !images.has(r.id)).length };
   }
   if (typeof module === 'object' && module.exports) {
-    module.exports = { productUrl, fromProps, csv, csvCell, collect, limitNewItems, xlsx, exportName, extractSku, firstColor, imageUrl, cardImage, detailImage, prepareImages, loadImage };
+    module.exports = { productUrl, fromProps, csv, csvCell, collect, selectUnbatchedItems, selectBatchRows, xlsx, exportName, extractSku, firstColor, imageUrl, cardImage, detailImage, prepareImages, loadImage };
     return;
   }
   if (['detail.tmall.com', 'detail.tmall.hk', 'item.taobao.com'].includes(location.hostname)) {
@@ -372,6 +377,7 @@
   const prefix = 'doudian.product.v1.';
   const shopKey = `doudian.shop.${location.hostname}`;
   const targetKey = `doudian.target.${location.hostname}`;
+  const batchKey = `doudian.batch.${location.hostname}`;
   const shopUrl = `${location.origin}/`;
   const host = document.createElement('div');
   host.id = 'doudian-collector';
@@ -384,18 +390,18 @@
       input[type=text]{width:100%;padding:7px;border:1px solid #ccc;border-radius:5px;margin:4px 0 8px} input[type=number]{width:65px} .row{display:flex;gap:7px;flex-wrap:wrap;margin:9px 0} .muted{font-size:12px;color:#667085}.status{white-space:pre-wrap;margin:9px 0;max-height:130px;overflow:auto}.hide{display:none!important} .min{float:right;padding:0 7px} a{color:#155cc5} .shops{display:flex;gap:12px;font-size:12px}
       .overlay{position:fixed;inset:5vh 4vw;z-index:2147483647;background:#fff;border:1px solid #ccc;box-shadow:0 5px 40px #0005;border-radius:10px;padding:18px;display:flex;flex-direction:column;font:14px/1.5 system-ui,sans-serif;color:#17212f}.scroll{overflow:auto;flex:1}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:8px;text-align:left}th{position:sticky;top:0;background:#f0f2f5}td:nth-child(2){min-width:240px}td:nth-child(3){min-width:112px}td:nth-child(4){min-width:120px}td:nth-child(8){word-break:break-all}td{white-space:normal;overflow-wrap:anywhere;vertical-align:middle} .head{display:flex;justify-content:space-between;margin-bottom:12px}
     </style>
-    <section class="panel"><button class="min" id="min">收起</button><h3>DouDian · 新品表 v1.5.1</h3>
+    <section class="panel"><button class="min" id="min">收起</button><h3>DouDian · 新品表 v1.5.2</h3>
     <div id="body"><label>店铺名称<input type="text" id="shop" placeholder="请确认或输入店铺名称"></label>
     <label>品类（用于文件名）<input type="text" id="category" placeholder="例如：运动套装、外套、全部宝贝"></label>
     <label><input id="confirmed" type="checkbox"> 我已进入本店商品列表并选择“新品”</label>
     <div class="muted">仅采集当前列表；新品排序不等于近期上架。可手动翻页后继续采集。</div>
     <div class="row"><button id="scan" class="primary">采集当前列表</button><button id="run">滚动采集</button><button id="stop" disabled>停止</button></div>
-    <label class="muted">本次最多新增 <input id="target" type="number" min="1" max="1000" value="120"> 条（达到数量即停止）</label>
+    <label class="muted">本次采集 <input id="target" type="number" min="1" max="1000" value="120"> 条（补采和导出均按本批）</label>
     <div id="status" class="status">等待采集。请先登录天猫并选择“新品”。</div><div id="count" class="muted"></div>
     <div class="row"><button id="preview">查看表格</button><button id="sku">补采货号和图片</button><button id="export">导出 Excel</button><button id="clear">清空全部</button></div>
     <div class="muted">导出前补采货号和缺失主图，图片实际嵌入 Excel。无法读取时留空并提示，其他商品正常导出。</div>
     <div class="shops"><a href="https://amencl.tmall.com/" target="_blank" rel="noopener noreferrer">amencl</a><a href="https://xiaozhubite.tmall.com/" target="_blank" rel="noopener noreferrer">xiaozhubite</a><a href="https://mcticco.tmall.com/" target="_blank" rel="noopener noreferrer">mcticco</a></div>
-    <p class="muted">数据保存在本机篡改猴中，三家店可累计导出。建议依次采集，导出后再清空。</p></div></section>
+    <p class="muted">查看、补采和导出仅处理本次采集批次；历史数据仍保存在本机篡改猴中。</p></div></section>
     <section class="overlay hide" id="overlay"><div class="head"><strong id="tableTitle">采集结果</strong><button id="close">关闭</button></div><div class="scroll"><table><thead><tr>${headers.map(h => `<th>${xml(h)}</th>`).join('')}</tr></thead><tbody id="rows"></tbody></table></div></section>`;
   const $ = id => shadow.getElementById(id);
   const status = text => { $('status').textContent = text; };
@@ -420,9 +426,22 @@
       .map(r => ({ ...r, image: imageUrl(r.image) || imageUrl(GM_getValue(imageCacheKey(r.id), null)?.image), category: r.category || (r.shopUrl === shopUrl ? clean($('category').value) : '') || '全部宝贝', sku: GM_getValue(skuCacheKey(r.id), null)?.sku || '' }))
       .sort((a, b) => a.shop.localeCompare(b.shop, 'zh-CN') || a.time.localeCompare(b.time));
   }
+  function batchRows() {
+    return selectBatchRows(allRows(), GM_getValue(batchKey, null), shopUrl);
+  }
+  function beginBatch() {
+    GM_setValue(batchKey, { ids: [], shopUrl, time: new Date().toISOString() });
+  }
+  function rememberBatch(ids, maxItems) {
+    if (!ids.length) return;
+    const batch = GM_getValue(batchKey, null) || { ids: [], shopUrl, time: new Date().toISOString() };
+    batch.ids = [...new Set([...(Array.isArray(batch.ids) ? batch.ids : []), ...ids.map(String)])].slice(0, maxItems);
+    batch.shopUrl = shopUrl;
+    GM_setValue(batchKey, batch);
+  }
   function refreshCount() {
     const rows = allRows();
-    $('count').textContent = `本店 ${rows.filter(r => r.shopUrl === shopUrl).length} 条 / 全部 ${rows.length} 条`;
+    $('count').textContent = `本批 ${batchRows().length} 条 / 本店 ${rows.filter(r => r.shopUrl === shopUrl).length} 条 / 全部 ${rows.length} 条`;
   }
   function cardLink(card, title) {
     const direct = domLink(card);
@@ -460,7 +479,7 @@
     return target;
   }
   $('target').onchange = readTarget;
-  function scan(maxNew = readTarget()) {
+  function scan(maxItems = readTarget()) {
     check();
     const shop = clean($('shop').value);
     GM_setValue(shopKey, shop);
@@ -469,44 +488,48 @@
       const key = prefix + location.hostname + '.' + item.id;
       return [item.id, GM_getValue(key, null)];
     }));
-    const limited = limitNewItems(result.items, item => previous.has(item.id) && previous.get(item.id), maxNew);
+    const batch = GM_getValue(batchKey, null);
+    const selected = selectUnbatchedItems(result.items, batch?.ids, maxItems);
     let added = 0;
-    for (const item of limited.items) {
+    for (const item of selected) {
       const key = prefix + location.hostname + '.' + item.id;
       const old = previous.get(item.id);
       if (!old) added++;
       GM_setValue(key, { ...item, image: item.image || old?.image || '', shop, category: clean($('category').value) || '全部宝贝', shopUrl, source: location.href, time: old?.time || new Date().toISOString() });
     }
+    rememberBatch(selected.map(item => item.id), maxItems);
     refreshCount();
-    status(`本次识别 ${result.items.length} 条，按设置最多新增 ${maxNew} 条，实际新增 ${added} 条。` + (result.missing ? `\n${result.missing} 张卡片缺少标题或可验证链接，未完整采集。` : '') + (!result.items.length ? '\n请确认已登录、商品已加载且处于商品列表。若仍为 0，请提供当前页面地址以适配。' : ''));
-    return { ...result, added, processed: limited.items.length, reached: limited.reached };
+    const batchCount = batchRows().length;
+    status(`本次识别 ${result.items.length} 条，纳入本批 ${selected.length} 条，当前批次 ${batchCount}/${maxItems} 条，实际新增 ${added} 条。` + (result.missing ? `\n${result.missing} 张卡片缺少标题或可验证链接，未完整采集。` : '') + (!result.items.length ? '\n请确认已登录、商品已加载且处于商品列表。若仍为 0，请提供当前页面地址以适配。' : ''));
+    return { ...result, added, processed: selected.length, batchCount, reached: batchCount >= maxItems };
   }
   function safe(action) { return () => { try { action(); } catch (e) { status(`操作未完成：${e.message}`); } }; }
   let running = false;
   let stopping = false;
-  $('scan').onclick = safe(scan);
+  $('scan').onclick = safe(() => { beginBatch(); scan(); });
   $('stop').onclick = () => { stopping = true; status('正在停止…'); };
   $('run').onclick = async () => {
     if (running) return;
     try { check(); } catch (e) { status(e.message); return; }
     const target = readTarget();
+    beginBatch();
     running = true; stopping = false;
     for (const id of ['scan', 'run', 'clear', 'sku', 'export']) $(id).disabled = true;
     $('stop').disabled = false;
-    let stale = 0, total = 0, reason = '已达到安全滚动上限；可继续采集或手动翻页。';
+    let stale = 0, total = 0, added = 0, reason = '已达到安全滚动上限；可继续采集或手动翻页。';
     try {
       for (let i = 0; i < 100 && !stopping && total < target; i++) {
-        const result = scan(target - total); total += result.added;
-        if (total >= target) { reason = `已按设置新增 ${target} 条。`; break; }
+        const result = scan(target); total = result.batchCount; added += result.added;
+        if (total >= target) { reason = `已按设置采集 ${target} 条。`; break; }
         if (!result.items.length) { reason = '未识别到商品，请检查登录状态和当前列表。'; break; }
         const bottom = window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 100;
-        stale = bottom && result.added === 0 ? stale + 1 : 0;
+        stale = bottom && result.processed === 0 ? stale + 1 : 0;
         if (stale >= 4) { reason = '已到页面底部且连续未新增；有下一页时请手动翻页继续。'; break; }
-        status(`滚动采集：累计新增 ${total}/${target} 条。\n当前缺少链接或标题的卡片：${result.missing}。`);
+        status(`滚动采集：本批 ${total}/${target} 条，其中新增 ${added} 条。\n当前缺少链接或标题的卡片：${result.missing}。`);
         window.scrollBy({ top: Math.max(400, window.innerHeight * .8), behavior: 'instant' });
         await new Promise(resolve => setTimeout(resolve, 1500));
       }
-      status(`本轮新增 ${total} 条。${stopping ? '已停止。' : reason}\n未识别的卡片不会导出；“采集当前列表”可查看缺失数。`);
+      status(`本批采集 ${total} 条，其中新增 ${added} 条。${stopping ? '已停止。' : reason}\n补采、查看和导出只处理本批商品。`);
     } catch (e) { status(`采集停止：${e.message}`); }
     finally {
       running = false;
@@ -515,7 +538,7 @@
     }
   };
   async function fillSkus(retryImages = false) {
-    const pending = [...new Map(allRows().filter(r => {
+    const pending = [...new Map(batchRows().filter(r => {
       const cached = GM_getValue(skuCacheKey(r.id), null);
       return !cached?.ok || (!r.image && (retryImages || !cached?.imageDone));
     }).map(r => [r.id, r])).values()];
@@ -561,10 +584,10 @@
       $('stop').disabled = true;
     }
   }
-  $('sku').onclick = () => withSkus(result => status(`补采完成，${result.failed} 个商品详情未能读取，${allRows().filter(r => !r.image).length} 行缺少图片。可查看表格或导出。`), true);
+  $('sku').onclick = () => withSkus(result => status(`本批补采完成，${result.failed} 个商品详情未能读取，${batchRows().filter(r => !r.image).length} 行缺少图片。可查看表格或导出。`), true);
   $('preview').onclick = safe(() => {
-    const rows = allRows(); $('rows').replaceChildren();
-    $('tableTitle').textContent = `采集结果 · ${rows.length} 条（预览前 1000 条，导出含全部）`;
+    const rows = batchRows(); $('rows').replaceChildren();
+    $('tableTitle').textContent = `本批采集结果 · ${rows.length} 条`;
     rows.slice(0, 1000).forEach(r => {
       const tr = document.createElement('tr');
       exportRow(r).forEach((text, column) => {
@@ -588,13 +611,13 @@
   });
   $('close').onclick = () => $('overlay').classList.add('hide');
   $('export').onclick = () => withSkus(async detailResult => {
-    const rows = allRows();
-    if (!rows.length) { status('暂无数据，请先采集。'); return; }
+    const rows = batchRows();
+    if (!rows.length) { status('本批暂无数据，请先采集。'); return; }
     const result = await prepareImages(rows, loadImage, (done, total) => status(`准备图片 ${done}/${total}，下载失败的图片将留空…`), () => stopping);
     const url = URL.createObjectURL(new Blob([xlsx(rows, result.images)], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
     const a = document.createElement('a'); a.href = url;
     const category = clean($('category').value) || '全部宝贝';
-    const namingRows = rows.every(r => r.shopUrl === shopUrl) ? rows.map(r => ({ ...r, category })) : rows;
+    const namingRows = rows.map(r => ({ ...r, category }));
     a.download = exportName(namingRows);
     shadow.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000);
     status(`已生成 ${a.download}，请查看浏览器下载列表。\n图片成功 ${rows.length - result.failed} 行，失败或缺图 ${result.failed} 行；详情未读到 ${detailResult.failed} 个。\n货号取首个颜色分类并加 IN 前缀；三列结果留空。`);
@@ -602,6 +625,7 @@
   $('clear').onclick = safe(() => {
     if (!confirm('清空所有店铺的采集数据？此操作不能撤销，请先导出。')) return;
     GM_listValues().filter(k => k.startsWith(prefix) || k.startsWith('doudian.sku.first-color.v1.') || k.startsWith('doudian.image.main.v1.')).forEach(k => GM_deleteValue(k));
+    GM_deleteValue(batchKey);
     $('rows').replaceChildren(); $('overlay').classList.add('hide'); refreshCount(); status('已清空所有店铺采集数据。');
   });
   $('min').onclick = () => { $('body').classList.toggle('hide'); $('min').textContent = $('body').classList.contains('hide') ? '展开' : '收起'; };
