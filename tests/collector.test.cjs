@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { productUrl, fromProps, csv, csvCell, collect, xlsx, exportName } = require('../tmall-new-products.user.js');
+const { productUrl, fromProps, csv, csvCell, collect, limitNewItems, xlsx, exportName } = require('../tmall-new-products.user.js');
 const { parseHTML } = require('linkedom');
 
 test('规范商品链接，剔除跟踪参数，拒绝非商品域名和无效ID', () => {
@@ -52,6 +52,19 @@ test('旧版商品链接仍可采集，隐藏卡片被排除', () => {
   assert.equal(result.items[0].title, '旧版儿童运动套装');
 });
 
+test('按设置限制每次新增数量，不再把页面已加载的 120 条全部写入', () => {
+  const items = Array.from({ length: 120 }, (_, i) => ({ id: String(i + 1) }));
+  const first = limitNewItems(items, () => false, 1);
+  assert.equal(first.items.length, 1);
+  assert.equal(first.newCount, 1);
+  assert.equal(first.reached, true);
+
+  const stored = new Set(['1', '2']);
+  const next = limitNewItems(items, item => stored.has(item.id), 3);
+  assert.deepEqual(next.items.map(item => item.id), ['1', '2', '3', '4', '5']);
+  assert.equal(next.newCount, 3);
+});
+
 test('文件名包含店名、品类、北京时间，跨店累计及非法字符得到处理', () => {
   const when = new Date('2026-10-14T18:00:00Z');
   assert.equal(exportName([{shop:'mcticco旗舰店'}], when), 'mcticco旗舰店_全部宝贝_20261015-020000.xlsx');
@@ -90,6 +103,7 @@ test('Excel 包含新版空列、文本类型、内容适配行列、中文及 X
   assert.ok(Number(sheet.querySelector('col[min="2"]').getAttribute('width')) > Number(sheet.querySelector('col[min="3"]').getAttribute('width')));
   assert.ok(files['xl/styles.xml'].includes('wrapText="1"'));
 });
+
 
 
 
